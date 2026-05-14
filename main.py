@@ -74,7 +74,7 @@ async def trigger_call(to: str):
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             "https://api.agentphone.ai/v1/calls",
-            json={"agentId": AGENTPHONE_AGENT_ID, "to": to},
+            json={"agentId": AGENTPHONE_AGENT_ID, "toNumber": to},
             headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
         )
     return resp.json()
