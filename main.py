@@ -61,8 +61,8 @@ async def handle_call(event: dict):
 
         return {"text": reply}
 
-    elif event_type == "call.ended":
-        print(f"[call.ended] callId={call_id} transcript={data.get('transcript')}")
+    elif event_type == "agent.call_ended":
+        print(f"[agent.call_ended] callId={call_id}")
         call_context.pop(call_id, None)
         return {}
 
