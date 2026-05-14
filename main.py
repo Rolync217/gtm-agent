@@ -34,7 +34,7 @@ async def handle_call(event: dict):
             "history": [],
             "lead": {"name": "Test Lead", "company": "Test Co"},
         }
-        return {}
+        return {"text": "Hey, this is Alex — I'm testing an AI sales agent. Can you say something back to me?"}
 
     elif event_type == "agent.message":
         ctx = call_context.get(call_id, {"history": [], "lead": {}})
