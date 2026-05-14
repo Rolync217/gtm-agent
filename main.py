@@ -24,10 +24,9 @@ async def health():
 
 @app.post("/webhook/call")
 async def handle_call(event: dict):
-    print(f"RAW EVENT: {event}")
-
-    call_id = event.get("callId")
-    event_type = event.get("type")
+    event_type = event.get("event")
+    data = event.get("data", {})
+    call_id = data.get("callId")
 
     print(f"[{event_type}] callId={call_id}")
 
@@ -40,7 +39,7 @@ async def handle_call(event: dict):
 
     elif event_type == "agent.message":
         ctx = call_context.get(call_id, {"history": [], "lead": {}})
-        user_text = event.get("content", "")
+        user_text = data.get("transcript", "")
         ctx["history"].append({"role": "user", "content": user_text})
 
         response = client.messages.create(
@@ -63,7 +62,7 @@ async def handle_call(event: dict):
         return {"text": reply}
 
     elif event_type == "call.ended":
-        print(f"[call.ended] callId={call_id}")
+        print(f"[call.ended] callId={call_id} transcript={data.get('transcript')}")
         call_context.pop(call_id, None)
         return {}
 
