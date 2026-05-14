@@ -24,6 +24,8 @@ async def health():
 
 @app.post("/webhook/call")
 async def handle_call(event: dict):
+    print(f"RAW EVENT: {event}")
+
     call_id = event.get("callId")
     event_type = event.get("type")
 
