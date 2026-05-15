@@ -15,6 +15,9 @@ AGENTPHONE_API_KEY = os.getenv("AGENTPHONE_API_KEY", "").strip()
 AGENTPHONE_AGENT_ID = os.getenv("AGENTPHONE_AGENT_ID", "").strip()
 CAL_COM_API_KEY = os.getenv("CAL_COM_API_KEY", "").strip()
 CAL_EVENT_URL = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-xdbyff/30-mins-discovery-call")
+TWILIO_ACCOUNT_SID = os.getenv("ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("AUTH_TOKEN", "").strip()
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
 
 DEMO_PHONE = "+12148977629"
 
@@ -130,12 +133,23 @@ RULES:
 
 
 # ---------------------------------------------------------------------------
-# SMS — booking link via AgentPhone
+# SMS — booking link via Twilio
 # ---------------------------------------------------------------------------
 async def send_sms_booking_link(to_phone: str):
-    # 10DLC registration required for outbound SMS — skipped for demo
-    # Booking link is logged here for demo purposes
-    print(f"[booking] LINK FOR {to_phone}: {CAL_EVENT_URL}")
+    msg = (
+        f"Hey {DEMO_LEAD['name']} — here's your 30-min discovery call link: "
+        f"{CAL_EVENT_URL}\n\nTalk soon! — Alex @ Rolync"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            r = await http.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+                data={"From": TWILIO_PHONE_NUMBER, "To": to_phone, "Body": msg},
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            )
+        print(f"[sms] sent to {to_phone} → {r.status_code}: {r.json().get('sid', r.text)}")
+    except Exception as e:
+        print(f"[sms] failed: {e}")
 
 
 def booking_confirmed(reply: str) -> bool:
