@@ -1,6 +1,7 @@
 import os
 import asyncio
 import httpx
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -10,13 +11,156 @@ load_dotenv()
 app = FastAPI()
 client = Anthropic()
 
-AGENTPHONE_API_KEY = os.getenv("AGENTPHONE_API_KEY")
-AGENTPHONE_AGENT_ID = os.getenv("AGENTPHONE_AGENT_ID")
+AGENTPHONE_API_KEY = os.getenv("AGENTPHONE_API_KEY", "").strip()
+AGENTPHONE_AGENT_ID = os.getenv("AGENTPHONE_AGENT_ID", "").strip()
+CAL_COM_API_KEY = os.getenv("CAL_COM_API_KEY", "").strip()
+CAL_EVENT_URL = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-xdbyff/30-mins-discovery-call")
 
-# In-memory call context — keyed by callId, lives for duration of one call
+DEMO_PHONE = "+12148977629"
+
 call_context: dict = {}
 
+# ---------------------------------------------------------------------------
+# Demo lead profile
+# ---------------------------------------------------------------------------
+DEMO_LEAD = {
+    "name": "Marcus",
+    "company": "Dataflow AI",
+    "role": "Co-founder & CTO",
+    "background": (
+        "Raised a $1.2M pre-seed 4 months ago. Has 8 paying customers, all from warm intros. "
+        "Tried Apollo for 6 weeks, got 1.8% reply rate, gave up. "
+        "Describes his ICP as 'basically any B2B company that automates workflows.' "
+        "Still spending 10+ hours a week doing sales himself."
+    ),
+}
 
+
+# ---------------------------------------------------------------------------
+# Cal.com — fetch real available slots at call start
+# ---------------------------------------------------------------------------
+async def get_available_slots() -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            r = await http.get(
+                "https://api.cal.com/v1/event-types",
+                params={"apiKey": CAL_COM_API_KEY},
+            )
+            event_types = r.json().get("event_types", [])
+            if not event_types:
+                return []
+
+            event_type_id = None
+            for et in event_types:
+                slug = et.get("slug", "")
+                if "discovery" in slug or "30" in slug:
+                    event_type_id = et["id"]
+                    break
+            if not event_type_id:
+                event_type_id = event_types[0]["id"]
+
+            now = datetime.now(timezone.utc)
+            end = now + timedelta(days=7)
+
+            r = await http.get(
+                "https://api.cal.com/v1/slots",
+                params={
+                    "apiKey": CAL_COM_API_KEY,
+                    "eventTypeId": event_type_id,
+                    "startTime": now.isoformat(),
+                    "endTime": end.isoformat(),
+                },
+            )
+            slots_data = r.json().get("slots", {})
+
+            readable = []
+            for date_key in sorted(slots_data.keys()):
+                for slot in slots_data[date_key]:
+                    raw = slot.get("time", "")
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    ct = dt - timedelta(hours=5)
+                    readable.append(ct.strftime("%A %b %d at %-I:%M %p CT"))
+                    if len(readable) >= 3:
+                        break
+                if len(readable) >= 3:
+                    break
+
+            return readable
+    except Exception as e:
+        print(f"[cal.com] slot fetch failed: {e}")
+        return []
+
+
+def build_system_prompt(lead: dict, slots: list[str]) -> str:
+    slots_text = (
+        ", ".join(slots) if slots
+        else "Tuesday or Wednesday this week (check cal.com link for exact times)"
+    )
+    return f"""You are Alex — direct, energetic, and sharp. You work for Rolync, an AI-powered GTM service that helps early-stage founders go from zero pipeline to qualified meetings on their calendar.
+
+You're calling {lead['name']}, {lead['role']} at {lead['company']}.
+
+INTEL:
+{lead['background']}
+
+YOUR GOAL: Qualify them, then book a 30-min discovery call.
+
+QUALIFICATION — they're a fit if:
+- Outbound hasn't worked (low reply rates, wrong targeting, gave up on tools)
+- All customers came through warm intros and they need to break out of that
+- They don't have a sharp, tested ICP
+- They're doing 5+ hrs/week of sales themselves
+
+CALL FLOW:
+1. Open by referencing their specific situation — not a generic intro
+2. Ask one sharp question at a time to surface the pain
+3. When they show interest, pitch the outcome: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
+4. Close: ask if they're open to a 30-min call
+5. When they say YES, say: "Perfect — I'm pulling up the calendar right now. I have {slots_text}. Which of those works?"
+6. When they confirm a time, say: "Done — sending you the booking link right now via text."
+
+RULES:
+- Max 2-3 sentences per turn — this is a phone call
+- Use {lead['name']}'s name naturally, not every turn
+- If they push back once, acknowledge and redirect to the outcome
+- If they're genuinely not interested after 2 tries, exit gracefully: "No worries at all — good luck with the pipeline. If it ever becomes a pain point, you know where to find us."
+- You already know their background. Don't ask questions you already know the answer to.
+"""
+
+
+# ---------------------------------------------------------------------------
+# SMS — booking link via AgentPhone
+# ---------------------------------------------------------------------------
+async def send_sms_booking_link(to_phone: str):
+    msg = (
+        f"Hey {DEMO_LEAD['name']} — here's the link to book your 30-min discovery call: "
+        f"{CAL_EVENT_URL}\n\nTalk soon! — Alex @ Rolync"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            r = await http.post(
+                "https://api.agentphone.ai/v1/messages",
+                json={
+                    "agent_id": AGENTPHONE_AGENT_ID,
+                    "to_number": to_phone,
+                    "body": msg,
+                },
+                headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
+            )
+        print(f"[sms] sent to {to_phone} → {r.status_code}")
+    except Exception as e:
+        print(f"[sms] failed: {e}")
+
+
+def booking_confirmed(reply: str) -> bool:
+    signals = ["sending you", "sent you", "booking link", "sending the link",
+               "sent the link", "via text", "right now via text"]
+    return any(s in reply.lower() for s in signals)
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def health():
     return {"status": "gtm-agent running"}
@@ -25,48 +169,72 @@ async def health():
 @app.post("/webhook/call")
 async def handle_call(event: dict):
     event_type = event.get("event")
+    channel = event.get("channel", "voice")
     data = event.get("data", {})
     call_id = data.get("callId")
 
-    print(f"[{event_type}] callId={call_id}")
+    print(f"[{event_type}] channel={channel} callId={call_id}")
 
     if event_type == "call.started":
+        print("[call.started] fetching Cal.com slots...")
+        slots = await get_available_slots()
+        print(f"[call.started] slots={slots}")
+
         call_context[call_id] = {
             "history": [],
-            "lead": {"name": "Test Lead", "company": "Test Co"},
+            "lead": DEMO_LEAD,
+            "slots": slots,
+            "phone": data.get("to", DEMO_PHONE),
+            "booking_sent": False,
         }
-        return {"text": "Hey, this is Alex — I'm testing an AI sales agent. Can you say something back to me?"}
 
-    elif event_type == "agent.message":
-        ctx = call_context.get(call_id, {"history": [], "lead": {}})
+        opening = (
+            f"Hey {DEMO_LEAD['name']}! This is Alex from Rolync. "
+            f"I was looking at Dataflow AI — congrats on the pre-seed raise. "
+            f"I work with founders at exactly your stage on a pretty specific problem. "
+            f"You got 60 seconds?"
+        )
+        return {"text": opening}
+
+    elif event_type == "agent.message" and channel == "voice":
+        ctx = call_context.get(call_id)
+        if not ctx:
+            return {"text": "Hey — I think we got cut off. This is Alex from Rolync. Can you hear me?"}
+
         user_text = data.get("transcript", "")
         ctx["history"].append({"role": "user", "content": user_text})
+        print(f"  user: {user_text}")
 
+        system = build_system_prompt(ctx["lead"], ctx["slots"])
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            system=(
-                "You are a friendly sales agent doing a quick intro call. "
-                "Keep every response under 2 sentences. Be warm and conversational."
-            ),
+            max_tokens=200,
+            system=system,
             messages=ctx["history"],
         )
-
         reply = response.content[0].text
         ctx["history"].append({"role": "assistant", "content": reply})
         call_context[call_id] = ctx
 
-        print(f"  user: {user_text}")
         print(f"  agent: {reply}")
+
+        if booking_confirmed(reply) and not ctx["booking_sent"]:
+            ctx["booking_sent"] = True
+            asyncio.create_task(send_sms_booking_link(ctx.get("phone", DEMO_PHONE)))
+            print(f"  [sms queued] → {ctx.get('phone', DEMO_PHONE)}")
 
         return {"text": reply}
 
     elif event_type == "agent.call_ended":
         transcript = data.get("transcript", [])
         duration = data.get("durationSeconds")
-        print(f"[agent.call_ended] callId={call_id} duration={duration}s")
+        sentiment = data.get("userSentiment", "unknown")
+        successful = data.get("callSuccessful", False)
+
+        print(f"[call_ended] callId={call_id} duration={duration}s sentiment={sentiment} success={successful}")
         for turn in transcript:
-            print(f"  {turn['role']}: {turn['content']}")
+            print(f"  {turn.get('role')}: {turn.get('content')}")
+
         call_context.pop(call_id, None)
         return {}
 
@@ -74,12 +242,13 @@ async def handle_call(event: dict):
 
 
 @app.post("/trigger-call")
-async def trigger_call(to: str):
-    """Fire a test call to any phone number."""
+async def trigger_call(to: str = DEMO_PHONE):
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             "https://api.agentphone.ai/v1/calls",
             json={"agentId": AGENTPHONE_AGENT_ID, "toNumber": to},
             headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
         )
-    return resp.json()
+    result = resp.json()
+    print(f"[trigger-call] → {to} | {result}")
+    return result
