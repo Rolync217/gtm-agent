@@ -19,7 +19,8 @@ TWILIO_ACCOUNT_SID = os.getenv("ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("AUTH_TOKEN", "").strip()
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
 
-DEMO_PHONE = "+12148977629"
+DEMO_PHONE = "+12142184795"
+DEMO_WHATSAPP = "+917017295891"
 
 call_context: dict = {}
 
@@ -120,7 +121,7 @@ CALL FLOW:
 3. When they show interest, pitch the outcome: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
 4. Close: ask if they're open to a 30-min call
 5. When they say YES, say: "Perfect — I'm pulling up the calendar right now. I have {slots_text}. Which of those works?"
-6. When they confirm a time, say: "Done — sending you the booking link right now via text."
+6. When they confirm a time, say: "Done — sending you the booking link right now via WhatsApp."
 
 RULES:
 - Max 2-3 sentences per turn — this is a phone call
@@ -135,7 +136,7 @@ RULES:
 # ---------------------------------------------------------------------------
 # SMS — booking link via Twilio
 # ---------------------------------------------------------------------------
-async def send_sms_booking_link(to_phone: str):
+async def send_whatsapp_booking_link(to_phone: str):
     msg = (
         f"Hey {DEMO_LEAD['name']} — here's your 30-min discovery call link: "
         f"{CAL_EVENT_URL}\n\nTalk soon! — Alex @ Rolync"
@@ -144,17 +145,17 @@ async def send_sms_booking_link(to_phone: str):
         async with httpx.AsyncClient(timeout=10.0) as http:
             r = await http.post(
                 f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-                data={"From": TWILIO_PHONE_NUMBER, "To": to_phone, "Body": msg},
+                data={"From": "whatsapp:+14155238886", "To": f"whatsapp:{to_phone}", "Body": msg},
                 auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
             )
-        print(f"[sms] sent to {to_phone} → {r.status_code}: {r.json().get('sid', r.text)}")
+        print(f"[whatsapp] sent to {to_phone} → {r.status_code}: {r.json().get('sid', r.text)}")
     except Exception as e:
-        print(f"[sms] failed: {e}")
+        print(f"[whatsapp] failed: {e}")
 
 
 def booking_confirmed(reply: str) -> bool:
     signals = ["sending you", "sent you", "booking link", "sending the link",
-               "sent the link", "via text", "right now via text"]
+               "sent the link", "via whatsapp", "right now via whatsapp"]
     return any(s in reply.lower() for s in signals)
 
 
@@ -199,8 +200,8 @@ async def handle_call(event: dict):
 
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
-            asyncio.create_task(send_sms_booking_link(ctx.get("phone", DEMO_PHONE)))
-            print(f"  [booking link logged] → {ctx.get('phone', DEMO_PHONE)}")
+            asyncio.create_task(send_whatsapp_booking_link(ctx.get("whatsapp", DEMO_WHATSAPP)))
+            print(f"  [whatsapp booking link] → {ctx.get('whatsapp', DEMO_WHATSAPP)}")
 
         hangup_signals = ["talk soon", "take care", "goodbye", "disconnecting", "have a good"]
         should_hangup = ctx["booking_sent"] and any(s in reply.lower() for s in hangup_signals)
@@ -253,6 +254,7 @@ async def trigger_call(to: str = DEMO_PHONE):
             "lead": DEMO_LEAD,
             "slots": slots,
             "phone": to,
+            "whatsapp": DEMO_WHATSAPP,
             "booking_sent": False,
         }
 
