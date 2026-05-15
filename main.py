@@ -15,12 +15,10 @@ AGENTPHONE_API_KEY = os.getenv("AGENTPHONE_API_KEY", "").strip()
 AGENTPHONE_AGENT_ID = os.getenv("AGENTPHONE_AGENT_ID", "").strip()
 CAL_COM_API_KEY = os.getenv("CAL_COM_API_KEY", "").strip()
 CAL_EVENT_URL = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-xdbyff/30-mins-discovery-call")
-TWILIO_ACCOUNT_SID = os.getenv("ACCOUNT_SID", "").strip()
-TWILIO_AUTH_TOKEN = os.getenv("AUTH_TOKEN", "").strip()
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+ZEPTOMAIL_TOKEN = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
 
 DEMO_PHONE = "+12142184795"
-DEMO_WHATSAPP = "+917017295891"
+DEMO_EMAIL = "anandabhinav217@gmail.com"
 
 call_context: dict = {}
 
@@ -121,7 +119,7 @@ CALL FLOW:
 3. When they show interest, pitch the outcome: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
 4. Close: ask if they're open to a 30-min call
 5. When they say YES, say: "Perfect — I'm pulling up the calendar right now. I have {slots_text}. Which of those works?"
-6. When they confirm a time, say: "Done — sending you the booking link right now via WhatsApp."
+6. When they confirm a time, say: "Done — sending you the booking link right now via email."
 
 RULES:
 - Max 2-3 sentences per turn — this is a phone call
@@ -134,28 +132,38 @@ RULES:
 
 
 # ---------------------------------------------------------------------------
-# SMS — booking link via Twilio
+# Email — booking link via ZeptoMail
 # ---------------------------------------------------------------------------
-async def send_whatsapp_booking_link(to_phone: str):
-    msg = (
-        f"Hey {DEMO_LEAD['name']} — here's your 30-min discovery call link: "
-        f"{CAL_EVENT_URL}\n\nTalk soon! — Alex @ Rolync"
-    )
+async def send_email_booking_link(to_email: str):
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
             r = await http.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-                data={"From": "whatsapp:+14155238886", "To": f"whatsapp:{to_phone}", "Body": msg},
-                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                "https://api.zeptomail.com/v1.1/email",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": ZEPTOMAIL_TOKEN,
+                },
+                json={
+                    "from": {"address": "alex@rolync.com", "name": "Alex | Rolync"},
+                    "to": [{"email_address": {"address": to_email, "name": DEMO_LEAD["name"]}}],
+                    "subject": "Your 30-min discovery call with Rolync",
+                    "htmlbody": (
+                        f"<p>Hey {DEMO_LEAD['name']},</p>"
+                        f"<p>Great speaking with you! Here's your booking link for our 30-min discovery call:</p>"
+                        f"<p><a href='{CAL_EVENT_URL}'>{CAL_EVENT_URL}</a></p>"
+                        f"<p>Talk soon,<br>Alex<br>Rolync</p>"
+                    ),
+                },
             )
-        print(f"[whatsapp] sent to {to_phone} → {r.status_code}: {r.json().get('sid', r.text)}")
+        print(f"[email] sent to {to_email} → {r.status_code}: {r.text[:100]}")
     except Exception as e:
-        print(f"[whatsapp] failed: {e}")
+        print(f"[email] failed: {e}")
 
 
 def booking_confirmed(reply: str) -> bool:
     signals = ["sending you", "sent you", "booking link", "sending the link",
-               "sent the link", "via whatsapp", "right now via whatsapp"]
+               "sent the link", "via email", "right now via email"]
     return any(s in reply.lower() for s in signals)
 
 
@@ -200,8 +208,8 @@ async def handle_call(event: dict):
 
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
-            asyncio.create_task(send_whatsapp_booking_link(ctx.get("whatsapp", DEMO_WHATSAPP)))
-            print(f"  [whatsapp booking link] → {ctx.get('whatsapp', DEMO_WHATSAPP)}")
+            asyncio.create_task(send_email_booking_link(ctx.get("email", DEMO_EMAIL)))
+            print(f"  [email booking link] → {ctx.get('email', DEMO_EMAIL)}")
 
         hangup_signals = ["talk soon", "take care", "goodbye", "disconnecting", "have a good"]
         should_hangup = ctx["booking_sent"] and any(s in reply.lower() for s in hangup_signals)
@@ -254,7 +262,7 @@ async def trigger_call(to: str = DEMO_PHONE):
             "lead": DEMO_LEAD,
             "slots": slots,
             "phone": to,
-            "whatsapp": DEMO_WHATSAPP,
+            "email": DEMO_EMAIL,
             "booking_sent": False,
         }
 
