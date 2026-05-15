@@ -26,7 +26,7 @@ call_context: dict = {}
 # Demo lead profile
 # ---------------------------------------------------------------------------
 DEMO_LEAD = {
-    "name": "Marcus",
+    "name": "Abhinav",
     "company": "Dataflow AI",
     "role": "Co-founder & CTO",
     "background": (
@@ -119,7 +119,8 @@ CALL FLOW:
 3. When they show interest, pitch the outcome: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
 4. Close: ask if they're open to a 30-min call
 5. When they say YES, say: "Perfect — I'm pulling up the calendar right now. I have {slots_text}. Which of those works?"
-6. When they confirm a time, say: "Done — sending you the booking link right now via email."
+6. When they confirm a time, say: "Got it. I have anandabhinav217@gmail.com on file — should I send the booking link there?"
+7. When they confirm the email, say: "Done — sending it over right now."
 
 RULES:
 - Max 2-3 sentences per turn — this is a phone call
@@ -145,7 +146,7 @@ async def send_email_booking_link(to_email: str):
                     "Authorization": ZEPTOMAIL_TOKEN,
                 },
                 json={
-                    "from": {"address": "alex@rolync.com", "name": "Alex | Rolync"},
+                    "from": {"address": "abhinav.anand@rolync.com", "name": "Alex | Rolync"},
                     "to": [{"email_address": {"address": to_email, "name": DEMO_LEAD["name"]}}],
                     "subject": "Your 30-min discovery call with Rolync",
                     "htmlbody": (
@@ -162,8 +163,8 @@ async def send_email_booking_link(to_email: str):
 
 
 def booking_confirmed(reply: str) -> bool:
-    signals = ["sending you", "sent you", "booking link", "sending the link",
-               "sent the link", "via email", "right now via email"]
+    signals = ["sending it over", "sent it over", "sending you", "sent you",
+               "booking link", "sending the link", "sent the link"]
     return any(s in reply.lower() for s in signals)
 
 
