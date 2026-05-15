@@ -123,8 +123,9 @@ RULES:
 - Max 2-3 sentences per turn — this is a phone call
 - Use {lead['name']}'s name naturally, not every turn
 - If they push back once, acknowledge and redirect to the outcome
-- If they're genuinely not interested after 2 tries, exit gracefully: "No worries at all — good luck with the pipeline. If it ever becomes a pain point, you know where to find us."
+- If they're genuinely not interested after 2 tries, exit gracefully: "No worries at all — good luck with the pipeline. If it ever becomes a pain point, you know where to find us." Then say "Take care!" and end.
 - You already know their background. Don't ask questions you already know the answer to.
+- Once you've sent the booking link and they've acknowledged it, say "Perfect — talk soon, {lead['name']}!" and end the call. Do not keep talking.
 """
 
 
@@ -132,24 +133,9 @@ RULES:
 # SMS — booking link via AgentPhone
 # ---------------------------------------------------------------------------
 async def send_sms_booking_link(to_phone: str):
-    msg = (
-        f"Hey {DEMO_LEAD['name']} — here's the link to book your 30-min discovery call: "
-        f"{CAL_EVENT_URL}\n\nTalk soon! — Alex @ Rolync"
-    )
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.post(
-                "https://api.agentphone.ai/v1/messages",
-                json={
-                    "agent_id": AGENTPHONE_AGENT_ID,
-                    "to_number": to_phone,
-                    "body": msg,
-                },
-                headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
-            )
-        print(f"[sms] sent to {to_phone} → {r.status_code}")
-    except Exception as e:
-        print(f"[sms] failed: {e}")
+    # 10DLC registration required for outbound SMS — skipped for demo
+    # Booking link is logged here for demo purposes
+    print(f"[booking] LINK FOR {to_phone}: {CAL_EVENT_URL}")
 
 
 def booking_confirmed(reply: str) -> bool:
@@ -200,9 +186,12 @@ async def handle_call(event: dict):
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
             asyncio.create_task(send_sms_booking_link(ctx.get("phone", DEMO_PHONE)))
-            print(f"  [sms queued] → {ctx.get('phone', DEMO_PHONE)}")
+            print(f"  [booking link logged] → {ctx.get('phone', DEMO_PHONE)}")
 
-        return {"text": reply}
+        hangup_signals = ["talk soon", "take care", "goodbye", "disconnecting", "have a good"]
+        should_hangup = ctx["booking_sent"] and any(s in reply.lower() for s in hangup_signals)
+
+        return {"text": reply, "hangup": should_hangup}
 
     elif event_type == "agent.call_ended":
         transcript = data.get("transcript", [])
