@@ -175,31 +175,10 @@ async def handle_call(event: dict):
 
     print(f"[{event_type}] channel={channel} callId={call_id}")
 
-    if event_type == "call.started":
-        print("[call.started] fetching Cal.com slots...")
-        slots = await get_available_slots()
-        print(f"[call.started] slots={slots}")
-
-        call_context[call_id] = {
-            "history": [],
-            "lead": DEMO_LEAD,
-            "slots": slots,
-            "phone": data.get("to", DEMO_PHONE),
-            "booking_sent": False,
-        }
-
-        opening = (
-            f"Hey {DEMO_LEAD['name']}! This is Alex from Rolync. "
-            f"I was looking at Dataflow AI — congrats on the pre-seed raise. "
-            f"I work with founders at exactly your stage on a pretty specific problem. "
-            f"You got 60 seconds?"
-        )
-        return {"text": opening}
-
-    elif event_type == "agent.message" and channel == "voice":
+    if event_type == "agent.message" and channel == "voice":
         ctx = call_context.get(call_id)
         if not ctx:
-            return {"text": "Hey — I think we got cut off. This is Alex from Rolync. Can you hear me?"}
+            return {}
 
         user_text = data.get("transcript", "")
         ctx["history"].append({"role": "user", "content": user_text})
@@ -243,12 +222,36 @@ async def handle_call(event: dict):
 
 @app.post("/trigger-call")
 async def trigger_call(to: str = DEMO_PHONE):
+    slots = await get_available_slots()
+
+    opening = (
+        f"Hey {DEMO_LEAD['name']}! This is Alex from Rolync. "
+        f"I was looking at Dataflow AI — congrats on the pre-seed raise. "
+        f"I work with founders at exactly your stage on a pretty specific problem. "
+        f"You got 60 seconds?"
+    )
+
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             "https://api.agentphone.ai/v1/calls",
-            json={"agentId": AGENTPHONE_AGENT_ID, "toNumber": to},
+            json={
+                "agentId": AGENTPHONE_AGENT_ID,
+                "toNumber": to,
+                "initialGreeting": opening,
+            },
             headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
         )
     result = resp.json()
-    print(f"[trigger-call] → {to} | {result}")
+    call_id = result.get("id")
+
+    if call_id:
+        call_context[call_id] = {
+            "history": [{"role": "assistant", "content": opening}],
+            "lead": DEMO_LEAD,
+            "slots": slots,
+            "phone": to,
+            "booking_sent": False,
+        }
+
+    print(f"[trigger-call] → {to} | callId={call_id} | slots={slots}")
     return result
