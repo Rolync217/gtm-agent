@@ -153,7 +153,7 @@ async def send_email_booking_link(to_email: str):
                         f"<p>Hey {DEMO_LEAD['name']},</p>"
                         f"<p>Great speaking with you! Here's your booking link for our 30-min discovery call:</p>"
                         f"<p><a href='{CAL_EVENT_URL}'>{CAL_EVENT_URL}</a></p>"
-                        f"<p>Talk soon,<br><strong>Abhinav Anand</strong><br>Founder & CEO, Rolync<br>+16514444766</p>"
+                        f"<p>Talk soon,<br><strong>Abhinav Anand</strong><br>Founder & CEO, Rolync<br>+16206999562</p>"
                     ),
                 },
             )
