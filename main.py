@@ -146,7 +146,7 @@ async def send_email_booking_link(to_email: str):
                     "Authorization": ZEPTOMAIL_TOKEN,
                 },
                 json={
-                    "from": {"address": "abhinav.anand@rolync.com", "name": "Alex | Rolync"},
+                    "from": {"address": "abhinav.anand@rolync.com", "name": "Rolync"},
                     "to": [{"email_address": {"address": to_email, "name": DEMO_LEAD["name"]}}],
                     "subject": "Your 30-min discovery call with Rolync",
                     "htmlbody": (
