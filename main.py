@@ -166,20 +166,85 @@ async def apollo_find_founder(domain: str) -> dict | None:
         return None
 
 
-async def score_and_brief(company: dict, website: str, contact: dict, icp: dict) -> dict:
+# ── LinkdAPI ──────────────────────────────────────────────────────────────────
+_linkdapi_last: float = 0.0
+
+async def _linkdapi_get(http: httpx.AsyncClient, path: str, params: dict) -> dict:
+    global _linkdapi_last
+    elapsed = asyncio.get_event_loop().time() - _linkdapi_last
+    if elapsed < 9.0:                      # stay under 7 req/min
+        await asyncio.sleep(9.0 - elapsed)
+    resp = await http.get(
+        f"https://linkdapi.com{path}",
+        params=params,
+        headers={"X-linkdapi-apikey": LINKD_API_KEY},
+    )
+    _linkdapi_last = asyncio.get_event_loop().time()
+    return resp.json()
+
+
+async def linkdapi_company_intel(company_name: str, founder_linkedin_url: str = "") -> str:
+    if not LINKD_API_KEY:
+        return ""
+    signals: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as http:
+            # Step 1: find company ID
+            data = await _linkdapi_get(http, "/api/v1/search/companies", {"keyword": company_name})
+            items = (data.get("data") or {})
+            if isinstance(items, dict):
+                items = items.get("items") or []
+            if not items:
+                return ""
+            company_id = items[0].get("companyID") or items[0].get("id") or ""
+            if not company_id:
+                return ""
+
+            # Step 2: company LinkedIn posts
+            data = await _linkdapi_get(http, "/api/v1/companies/company/posts", {"id": str(company_id)})
+            posts_raw = data.get("data") or []
+            if isinstance(posts_raw, dict):
+                posts_raw = posts_raw.get("data") or posts_raw.get("items") or []
+            post_texts = []
+            for p in posts_raw[:5]:
+                t = p.get("text") or p.get("commentary") or p.get("description") or ""
+                if t and len(t) > 20:
+                    post_texts.append(t[:250])
+            if post_texts:
+                signals.append("LinkedIn posts: " + " | ".join(post_texts))
+
+            # Step 3: founder profile if LinkedIn URL available
+            if founder_linkedin_url and "/in/" in founder_linkedin_url:
+                username = founder_linkedin_url.rstrip("/").split("/in/")[-1].split("?")[0].rstrip("/")
+                if username:
+                    data = await _linkdapi_get(http, "/api/v1/profile/overview", {"username": username})
+                    p = data.get("data") or {}
+                    headline = p.get("headline") or p.get("title") or ""
+                    about = p.get("about") or p.get("summary") or ""
+                    if headline or about:
+                        signals.append(f"Founder profile: {headline} | {about[:300]}")
+
+    except Exception as e:
+        print(f"[linkdapi] {company_name}: {e}")
+
+    return "\n".join(signals)
+
+
+async def score_and_brief(company: dict, website: str, contact: dict, linkedin: str, icp: dict) -> dict:
     prompt = f"""ICP:
 {json.dumps(icp, indent=2)}
 
 Company: {company['name']} (YC {company.get('batch', '')})
 Description: {company.get('description', '')}
-Website: {website[:600]}
+Website content: {website[:500]}
+LinkedIn signals: {linkedin[:600] if linkedin else 'none'}
 Contact: {contact.get('first_name', '')} {contact.get('last_name', '')}, {contact.get('title', '')}
 
 Return JSON only:
 {{
   "score": <int 0-100>,
-  "reasoning": "<2 sentences: why this is or isn't an ICP fit>",
-  "call_brief": "<3 sentences of cold call intel: what they do, stage, most likely pain>"
+  "reasoning": "<2 sentences: why this is or isn't an ICP fit, cite LinkedIn signals if useful>",
+  "call_brief": "<3 sentences of cold call intel: what they do, stage, most likely pain point>"
 }}"""
     try:
         resp = client.messages.create(
@@ -229,8 +294,16 @@ async def run_pipeline(session_id: str, icp: dict):
         cname = f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip()
         await emit("status", message=f"  ↳ Found {cname} ({contact.get('title', '')})")
 
+        await emit("status", message=f"Checking LinkedIn signals for {name}...")
+        linkedin_intel = await linkdapi_company_intel(name, contact.get("linkedin_url", ""))
+        if linkedin_intel:
+            preview = linkedin_intel[:120].replace("\n", " ")
+            await emit("status", message=f"  ↳ {preview}...")
+        else:
+            await emit("status", message=f"  ↳ No LinkedIn data found")
+
         await emit("status", message=f"Scoring ICP fit for {name}...")
-        scored = await score_and_brief(company, website, contact, icp)
+        scored = await score_and_brief(company, website, contact, linkedin_intel, icp)
         score = scored.get("score", 0)
         await emit("status", message=f"  ↳ {score}/100 — {scored.get('reasoning', '')}")
 
@@ -303,6 +376,18 @@ async def icp_message(body: dict):
             print(f"[icp] parse error: {e}")
 
     return {"session_id": session_id, "reply": display, "locked": locked, "icp": icp_data}
+
+
+@app.post("/icp/preset")
+async def icp_preset(body: dict):
+    """Skip ICP chat — load a pre-built ICP directly and return a session ready for sourcing."""
+    icp = body.get("icp")
+    if not icp:
+        return {"error": "icp required"}
+    session_id = str(uuid.uuid4())
+    icp_locked[session_id] = icp
+    icp_history[session_id] = []
+    return {"session_id": session_id, "icp": icp}
 
 
 @app.post("/leads/source")

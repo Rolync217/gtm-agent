@@ -68,6 +68,12 @@
       Send
     </button>
   </div>
+  <div class="mt-3 text-center">
+    <button onclick="usePresetIcp()"
+      class="text-xs text-gray-600 hover:text-gray-400 underline underline-offset-2 transition-colors">
+      Skip — use Rolync ICP
+    </button>
+  </div>
 </div>
 
 <!-- ── View 2: Lead Pipeline ──────────────────────────────────────────────── -->
@@ -182,6 +188,26 @@ function showIcpCard(icp) {
   document.getElementById('input-row').classList.add('hidden');
   step(2);
   document.getElementById('icp-card').scrollIntoView({behavior: 'smooth'});
+}
+
+async function usePresetIcp() {
+  const icp = {
+    industry: "B2B SaaS",
+    stage: "Seed / Series A",
+    company_size: "1-50 employees",
+    target_roles: ["co-founder", "ceo", "founder"],
+    pain_points: ["no outbound pipeline", "all customers from warm intros", "founder doing sales manually"],
+    hn_keywords: ["saas", "b2b", "workflow", "enterprise"]
+  };
+  const r = await fetch('/icp/preset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({icp}),
+  });
+  const d = await r.json();
+  sessionId = d.session_id;
+  lockedIcp = icp;
+  showIcpCard(icp);
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
