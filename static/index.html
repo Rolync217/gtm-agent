@@ -12,6 +12,11 @@
   @keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   .pulse-dot { animation: pulseDot 1.5s ease-in-out infinite; }
   @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .wf-bar { flex-shrink: 0; width: 4px; border-radius: 2px; background: rgba(255,255,255,0.45); transform-origin: center; }
+  .wf-bar.wave-idle { animation: wfIdle var(--dur,0.7s) ease-in-out var(--delay,0s) infinite; }
+  .wf-bar.wave-talk { animation: wfTalk var(--fdur,0.3s) ease-in-out var(--delay,0s) infinite; }
+  @keyframes wfIdle { 0%,100% { transform:scaleY(0.22); opacity:0.28; } 50% { transform:scaleY(0.62); opacity:0.52; } }
+  @keyframes wfTalk { 0%,100% { transform:scaleY(0.55); opacity:0.65; } 50% { transform:scaleY(1.18); opacity:1.0; } }
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
@@ -68,10 +73,15 @@
       Send
     </button>
   </div>
-  <div class="mt-3 text-center">
+  <div class="mt-3 text-center flex items-center justify-center gap-4">
     <button onclick="usePresetIcp()"
       class="text-xs text-gray-600 hover:text-gray-400 underline underline-offset-2 transition-colors">
       Skip — use Rolync ICP
+    </button>
+    <span class="text-gray-800 text-xs">·</span>
+    <button onclick="jumpToCall()"
+      class="text-xs text-indigo-600 hover:text-indigo-400 underline underline-offset-2 transition-colors">
+      ⚡ Demo call (instant)
     </button>
   </div>
 </div>
@@ -105,20 +115,56 @@
 </div>
 
 <!-- ── View 3: Call Screen ─────────────────────────────────────────────────── -->
-<div id="view-call" class="hidden max-w-xl mx-auto px-4 py-6 flex flex-col" style="min-height: calc(100vh - 56px)">
+<div id="view-call" class="hidden flex flex-col" style="height:calc(100vh - 56px); background:linear-gradient(165deg,#0d2210 0%,#091a0b 52%,#050d06 100%)">
 
-  <!-- Lead header -->
-  <div id="call-header" class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4"></div>
-
-  <!-- Status -->
-  <div class="flex items-center gap-2.5 mb-4">
-    <div id="dot" class="w-2.5 h-2.5 bg-green-500 rounded-full pulse-dot"></div>
-    <span id="call-status" class="text-sm text-gray-400">Connecting...</span>
+  <!-- Name pill + timer + status -->
+  <div class="flex flex-col items-center pt-10 pb-1">
+    <div class="bg-black/40 backdrop-blur-sm border border-white/10 rounded-full px-5 py-2 flex items-center gap-3">
+      <span id="call-name-pill" class="text-white text-sm font-medium tracking-tight">Calling...</span>
+      <span class="text-white/20 text-xs">·</span>
+      <span id="call-timer" class="text-white/45 text-sm font-mono tabular-nums">00:00</span>
+    </div>
+    <div class="flex items-center gap-2 mt-3">
+      <div id="status-dot" class="w-1.5 h-1.5 bg-green-400 rounded-full pulse-dot"></div>
+      <span id="call-status" class="text-white/35 text-xs">Connecting...</span>
+    </div>
   </div>
 
-  <!-- Transcript -->
-  <div id="transcript" class="flex-1 overflow-y-auto space-y-3 pr-0.5">
-    <div id="tx-empty" class="text-center text-gray-600 text-sm pt-8">Waiting for call to connect...</div>
+  <!-- Waveform -->
+  <div class="flex-1 flex items-center justify-center">
+    <div id="waveform" class="flex items-center justify-center gap-1.5" style="height:100px;width:100%;max-width:380px;padding:0 20px;box-sizing:border-box"></div>
+  </div>
+
+  <!-- Controls -->
+  <div class="flex justify-center items-center gap-7 pb-9">
+    <button class="w-14 h-14 bg-white/10 hover:bg-white/16 border border-white/10 rounded-full flex items-center justify-center transition-all" title="Microphone">
+      <svg width="20" height="20" fill="none" stroke="white" stroke-width="2" viewBox="0 0 24 24">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </button>
+    <button class="w-14 h-14 bg-white/10 hover:bg-white/16 border border-white/10 rounded-full flex items-center justify-center transition-all" title="Speaker">
+      <svg width="20" height="20" fill="none" stroke="white" stroke-width="2" viewBox="0 0 24 24">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+      </svg>
+    </button>
+    <button onclick="endCall()" class="w-16 h-16 bg-red-500 hover:bg-red-400 rounded-full flex items-center justify-center transition-all" style="box-shadow:0 0 28px rgba(239,68,68,0.32)" title="End call">
+      <svg width="24" height="24" fill="white" viewBox="0 0 24 24">
+        <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Transcript card -->
+  <div id="transcript-wrap" class="bg-black/38 backdrop-blur-md border-t border-white/8 rounded-t-3xl overflow-y-auto" style="max-height:215px">
+    <div class="px-5 pt-4 pb-0.5">
+      <span class="text-xs text-white/28 font-semibold uppercase tracking-widest">Transcript</span>
+    </div>
+    <div id="transcript" class="px-5 pb-5 space-y-3">
+      <div id="tx-empty" class="text-center text-white/22 text-sm py-3">Waiting for call to connect...</div>
+    </div>
   </div>
 </div>
 
@@ -126,6 +172,57 @@
 let sessionId = null;
 let lockedIcp = null;
 let activeLead = null;
+let callStartTime = null;
+let callTimerInterval = null;
+let waveTimer = null;
+let activeCallEs = null;
+
+function initWaveform() {
+  const wf = document.getElementById('waveform');
+  wf.innerHTML = '';
+  const n = 22;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const bell = Math.exp(-Math.pow((t - 0.5) * 2.8, 2));
+    const h = ((0.12 + bell * 0.72 + Math.random() * 0.16) * 100).toFixed(0);
+    const dur = (0.5 + Math.random() * 0.45).toFixed(2);
+    const delay = (Math.random() * 0.45).toFixed(2);
+    const fdur = (parseFloat(dur) * 0.42).toFixed(2);
+    const bar = document.createElement('div');
+    bar.className = 'wf-bar wave-idle';
+    bar.style.cssText = `height:${h}%;--dur:${dur}s;--fdur:${fdur}s;--delay:${delay}s`;
+    wf.appendChild(bar);
+  }
+}
+
+function setWaveState(talking) {
+  if (waveTimer) clearTimeout(waveTimer);
+  document.querySelectorAll('.wf-bar').forEach(b => {
+    b.classList.toggle('wave-idle', !talking);
+    b.classList.toggle('wave-talk', talking);
+  });
+  if (talking) waveTimer = setTimeout(() => setWaveState(false), 4500);
+}
+
+function startCallTimer() {
+  callStartTime = Date.now();
+  callTimerInterval = setInterval(() => {
+    const el = document.getElementById('call-timer');
+    if (!el) return;
+    const ms = Date.now() - callStartTime;
+    const m = Math.floor(ms / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }, 1000);
+}
+
+function endCall() {
+  if (activeCallEs) { activeCallEs.close(); activeCallEs = null; }
+  setWaveState(false);
+  if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+  document.getElementById('status-dot').className = 'w-1.5 h-1.5 bg-gray-600 rounded-full';
+  document.getElementById('call-status').textContent = 'Call ended';
+}
 
 // ── ICP ───────────────────────────────────────────────────────────────────────
 async function send() {
@@ -188,6 +285,19 @@ function showIcpCard(icp) {
   document.getElementById('input-row').classList.add('hidden');
   step(2);
   document.getElementById('icp-card').scrollIntoView({behavior: 'smooth'});
+}
+
+async function jumpToCall() {
+  const r = await fetch('/leads/seed-demo', {method: 'POST'});
+  const lead = await r.json();
+  // Show leads view briefly then trigger the call
+  document.getElementById('view-icp').classList.add('hidden');
+  document.getElementById('view-leads').classList.remove('hidden');
+  step(3);
+  addLog('⚡ Demo lead seeded — dialing...');
+  addCard(lead);
+  // Auto-dial after a beat so the card renders
+  setTimeout(() => callLead(lead.id), 600);
 }
 
 async function usePresetIcp() {
@@ -290,38 +400,35 @@ async function callLead(leadId) {
   const r = await fetch(`/leads/${leadId}/call`, {method: 'POST'});
   const d = await r.json();
 
-  if (!d.call_id) {
-    btn.textContent = 'Failed';
-    return;
-  }
+  if (!d.call_id) { btn.textContent = 'Failed'; return; }
 
-  // Get full lead for header
   const leads = await (await fetch('/leads')).json();
   activeLead = leads.find(l => l.id === leadId);
 
-  // Switch view
   document.getElementById('view-leads').classList.add('hidden');
   document.getElementById('view-call').classList.remove('hidden');
+  initWaveform();
 
   if (activeLead) {
-    document.getElementById('call-header').innerHTML = `
-      <div class="flex items-center justify-between mb-2">
-        <div>
-          <div class="font-semibold text-white text-sm">${esc(activeLead.company)}</div>
-          <div class="text-xs text-gray-500 mt-0.5">${esc(activeLead.contact_name)} · ${esc(activeLead.contact_role)}</div>
-        </div>
-        <span class="text-xs font-semibold px-2 py-0.5 rounded-md ${scoreBadge(activeLead.icp_score)}">${activeLead.icp_score}/100</span>
-      </div>
-      <p class="text-xs text-gray-600 leading-relaxed">${esc(activeLead.call_brief)}</p>`;
+    const first = activeLead.contact_name.split(' ')[0];
+    document.getElementById('call-name-pill').textContent = `${first} · ${activeLead.company}`;
   }
 
+  callStartTime = null;
+  if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+
   const es = new EventSource(`/call/${d.call_id}/stream`);
+  activeCallEs = es;
+
   es.onmessage = (e) => {
     const turn = JSON.parse(e.data);
-    if (turn.content) addTurn(turn.role, turn.content);
+    if (turn.content) {
+      if (!callStartTime) startCallTimer();
+      addTurn(turn.role, turn.content);
+      setWaveState(true);
+    }
     if (turn.hangup) {
-      document.getElementById('dot').className = 'w-2.5 h-2.5 bg-gray-600 rounded-full';
-      document.getElementById('call-status').textContent = 'Call ended';
+      endCall();
       es.close();
     } else if (turn.role === 'user') {
       document.getElementById('call-status').textContent = 'Prospect speaking...';
@@ -336,14 +443,14 @@ function addTurn(role, content) {
   document.getElementById('tx-empty')?.remove();
   const t = document.getElementById('transcript');
   const isAgent = role === 'assistant';
+  const speaker = isAgent ? 'Alex' : (activeLead?.contact_name?.split(' ')[0] || 'Prospect');
   const el = document.createElement('div');
-  el.className = 'slide-in flex gap-2.5' + (isAgent ? '' : ' justify-end');
-  el.innerHTML = isAgent
-    ? `<div class="w-7 h-7 bg-indigo-600 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-semibold mt-0.5">AI</div>
-       <div class="bg-gray-800 rounded-2xl rounded-tl-none px-4 py-3 max-w-xs text-sm leading-relaxed">${esc(content)}</div>`
-    : `<div class="bg-gray-700 rounded-2xl rounded-tr-none px-4 py-3 max-w-xs text-sm leading-relaxed">${esc(content)}</div>`;
+  el.className = 'slide-in flex gap-3 items-start';
+  el.innerHTML = `
+    <span class="text-xs font-semibold pt-0.5 flex-shrink-0 ${isAgent ? 'text-indigo-400' : 'text-white/50'}" style="min-width:46px">${esc(speaker)}</span>
+    <span class="text-sm text-white/80 leading-relaxed">${esc(content)}</span>`;
   t.appendChild(el);
-  t.scrollTop = t.scrollHeight;
+  document.getElementById('transcript-wrap').scrollTop = 99999;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

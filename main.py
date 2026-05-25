@@ -1,5 +1,6 @@
 import os
 import asyncio
+import base64
 import httpx
 import json
 import re
@@ -533,7 +534,91 @@ RULES:
 - Once booking sent and acknowledged: "Perfect — talk soon, {lead['name']}!" and end."""
 
 
-async def send_email_booking_link(to_email: str):
+def _generate_ics(start_iso: str, end_iso: str, name: str, email: str, video_url: str) -> str:
+    def _fmt(iso: str) -> str:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.strftime("%Y%m%dT%H%M%SZ")
+    now_fmt = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0",
+        "PRODID:-//Rolync//GTM Agent//EN", "METHOD:REQUEST",
+        "BEGIN:VEVENT",
+        f"UID:{uuid.uuid4()}@rolync.com",
+        f"DTSTAMP:{now_fmt}",
+        f"DTSTART:{_fmt(start_iso)}",
+        f"DTEND:{_fmt(end_iso)}",
+        "SUMMARY:30-min Discovery Call · Rolync",
+        f"DESCRIPTION:Book here: {video_url}",
+        f"LOCATION:{video_url}",
+        "ORGANIZER;CN=Abhinav at Rolync:mailto:abhinav.anand@rolync.com",
+        f"ATTENDEE;RSVP=TRUE;CN={name}:mailto:{email}",
+        "END:VEVENT", "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+async def _get_first_raw_slot() -> tuple[str | None, str | None, int | None]:
+    """Returns (start_iso, end_iso, event_type_id) for the first available Cal.com slot."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            r = await http.get("https://api.cal.com/v1/event-types", params={"apiKey": CAL_COM_API_KEY})
+            event_types = r.json().get("event_types", [])
+            if not event_types:
+                return None, None, None
+            eid = next(
+                (e["id"] for e in event_types if "discovery" in e.get("slug", "") or "30" in e.get("slug", "")),
+                event_types[0]["id"],
+            )
+            duration = next((e.get("length", 30) for e in event_types if e["id"] == eid), 30)
+            now = datetime.now(timezone.utc)
+            r = await http.get("https://api.cal.com/v1/slots", params={
+                "apiKey": CAL_COM_API_KEY, "eventTypeId": eid,
+                "startTime": now.isoformat(), "endTime": (now + timedelta(days=7)).isoformat(),
+            })
+            for dk in sorted(r.json().get("slots", {}).keys()):
+                slots_on_day = r.json()["slots"][dk]
+                if slots_on_day:
+                    start_iso = slots_on_day[0]["time"]
+                    start_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                    end_iso = (start_dt + timedelta(minutes=duration)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    return start_iso, end_iso, eid
+    except Exception as e:
+        print(f"[cal slots] {e}")
+    return None, None, None
+
+
+async def send_calendar_invite(to_email: str, name: str = "Founder"):
+    start_iso, end_iso, eid = await _get_first_raw_slot()
+
+    if not start_iso:
+        start_dt = datetime.now(timezone.utc) + timedelta(hours=48)
+        start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = (start_dt + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Create real Cal.com booking so their system also sends a confirmation
+    if eid:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                r = await http.post(
+                    f"https://api.cal.com/v1/bookings?apiKey={CAL_COM_API_KEY}",
+                    json={
+                        "eventTypeId": eid,
+                        "start": start_iso,
+                        "end": end_iso,
+                        "responses": {"name": name, "email": to_email},
+                        "metadata": {"source": "rolync-ai-call"},
+                    },
+                )
+            print(f"[cal booking] {r.status_code} {r.text[:200]}")
+        except Exception as e:
+            print(f"[cal booking] {e}")
+
+    ics = _generate_ics(start_iso, end_iso, name, to_email, CAL_EVENT_URL)
+    ics_b64 = base64.b64encode(ics.encode("utf-8")).decode()
+
+    start_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+    readable = (start_dt - timedelta(hours=5)).strftime("%A, %B %-d at %-I:%M %p CT")
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
             await http.post(
@@ -541,27 +626,25 @@ async def send_email_booking_link(to_email: str):
                 headers={"Accept": "application/json", "Content-Type": "application/json",
                          "Authorization": ZEPTOMAIL_TOKEN},
                 json={
-                    "from": {"address": "abhinav.anand@rolync.com", "name": "Rolync"},
-                    "to": [{"email_address": {"address": to_email, "name": "Founder"}}],
-                    "subject": "Your 30-min discovery call with Rolync",
-                    "htmlbody": f"<p>Here's your booking link: <a href='{CAL_EVENT_URL}'>{CAL_EVENT_URL}</a></p><p>— Abhinav, Rolync</p>",
+                    "from": {"address": "abhinav.anand@rolync.com", "name": "Abhinav at Rolync"},
+                    "to": [{"email_address": {"address": to_email, "name": name}}],
+                    "subject": f"Your Rolync discovery call — {readable}",
+                    "htmlbody": (
+                        f"<p>Hey {name},</p>"
+                        f"<p>Great talking! Your 30-min call is set for <strong>{readable}</strong>.</p>"
+                        f"<p>Open the attached .ics file to add it to your calendar.</p>"
+                        f"<p>Talk soon,<br>Abhinav<br>Rolync</p>"
+                    ),
+                    "attachments": [{
+                        "name": "rolync-discovery-call.ics",
+                        "content": ics_b64,
+                        "mime_type": "text/calendar; method=REQUEST; charset=UTF-8",
+                    }],
                 },
             )
+        print(f"[email] calendar invite sent to {to_email}")
     except Exception as e:
         print(f"[email] {e}")
-
-
-async def send_sms_booking_link(to_number: str):
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            await http.post(
-                "https://api.agentphone.ai/v1/messages",
-                headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}", "Content-Type": "application/json"},
-                json={"agent_id": AGENTPHONE_AGENT_ID, "to_number": to_number,
-                      "body": f"Here's your booking link: {CAL_EVENT_URL}"},
-            )
-    except Exception as e:
-        print(f"[sms] {e}")
 
 
 def booking_confirmed(reply: str) -> bool:
@@ -573,6 +656,33 @@ def booking_confirmed(reply: str) -> bool:
 @app.get("/")
 async def health():
     return {"status": "gtm-agent running"}
+
+
+@app.post("/leads/seed-demo")
+async def seed_demo_lead():
+    """Instantly plant a demo lead — skips the research pipeline for UI testing."""
+    lead_id = str(uuid.uuid4())
+    leads_store[lead_id] = {
+        "id": lead_id,
+        "company": "Promptless",
+        "batch": "W25",
+        "contact_name": "Prithvi Rajan",
+        "contact_role": "Co-founder & CEO",
+        "contact_linkedin": "https://linkedin.com/in/prithvirajan",
+        "icp_score": 88,
+        "research_summary": (
+            "Promptless (YC W25) builds a code review agent that auto-learns from your team's "
+            "past PRs. $220K ARR, 8 devtools customers all from warm intros. "
+            "Founder posts weekly about AI-assisted engineering workflows."
+        ),
+        "call_brief": (
+            "Prithvi is doing 20+ hrs/week of sales himself with no outbound motion — "
+            "all traction is warm intros. Reference his LinkedIn post about first customers "
+            "and the fact that they haven't cracked cold outreach yet."
+        ),
+        "status": "sourced",
+    }
+    return leads_store[lead_id]
 
 
 @app.get("/app", response_class=HTMLResponse)
@@ -682,8 +792,8 @@ async def handle_call(event: dict):
 
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
-            asyncio.create_task(send_sms_booking_link(ctx.get("phone", DEMO_PHONE)))
-            asyncio.create_task(send_email_booking_link(ctx.get("email", DEMO_EMAIL)))
+            lead_name = ctx.get("lead", {}).get("name", "Founder")
+            asyncio.create_task(send_calendar_invite(ctx.get("email", DEMO_EMAIL), lead_name))
 
         hangup_signals = ["talk soon", "take care", "goodbye", "disconnecting", "have a good"]
         should_hangup = ctx["booking_sent"] and any(s in reply.lower() for s in hangup_signals)
