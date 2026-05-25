@@ -1,8 +1,12 @@
 import os
 import asyncio
 import httpx
+import json
+import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse, HTMLResponse
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -11,20 +15,26 @@ load_dotenv()
 app = FastAPI()
 client = Anthropic()
 
-AGENTPHONE_API_KEY = os.getenv("AGENTPHONE_API_KEY", "").strip()
+# ── Env vars ──────────────────────────────────────────────────────────────────
+AGENTPHONE_API_KEY  = os.getenv("AGENTPHONE_API_KEY", "").strip()
 AGENTPHONE_AGENT_ID = os.getenv("AGENTPHONE_AGENT_ID", "").strip()
-CAL_COM_API_KEY = os.getenv("CAL_COM_API_KEY", "").strip()
-CAL_EVENT_URL = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-xdbyff/30-mins-discovery-call")
-ZEPTOMAIL_TOKEN = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
+CAL_COM_API_KEY     = os.getenv("CAL_COM_API_KEY", "").strip()
+CAL_EVENT_URL       = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-xdbyff/30-mins-discovery-call")
+ZEPTOMAIL_TOKEN     = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
+APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "").strip()
+FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "").strip()
 
 DEMO_PHONE = "+12142184795"
 DEMO_EMAIL = "anandabhinav217@gmail.com"
 
-call_context: dict = {}
+# ── In-memory state ───────────────────────────────────────────────────────────
+call_context:    dict = {}
+icp_history:     dict = {}
+icp_locked:      dict = {}
+leads_store:     dict = {}
+pipeline_queues: dict = {}
+call_streams:    dict = {}
 
-# ---------------------------------------------------------------------------
-# Demo lead profile
-# ---------------------------------------------------------------------------
 DEMO_LEAD = {
     "name": "Abhinav",
     "company": "Dataflow AI",
@@ -38,67 +48,332 @@ DEMO_LEAD = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Cal.com — fetch real available slots at call start
-# ---------------------------------------------------------------------------
+# ── Utilities ─────────────────────────────────────────────────────────────────
+def extract_json(text: str) -> dict:
+    text = text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    return json.loads(text)
+
+
+def parse_launch_hn(title: str) -> dict | None:
+    m = re.match(r"Launch HN:\s*(.+?)\s*\(YC\s*([WS]\d{2})\)\s*[–—-]+\s*(.+)", title, re.IGNORECASE)
+    if not m:
+        return None
+    return {"name": m.group(1).strip(), "batch": m.group(2).upper(), "description": m.group(3).strip()}
+
+
+def clean_html(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&#x2F;", "/", text)
+    text = re.sub(r"&amp;", "&", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_domain(url: str) -> str:
+    if not url:
+        return ""
+    url = re.sub(r"^https?://", "", url)
+    url = re.sub(r"^www\.", "", url)
+    return url.split("/")[0].split("?")[0]
+
+
+# ── External API clients ──────────────────────────────────────────────────────
+async def search_yc_for_icp(hn_keywords: list[str]) -> list[dict]:
+    companies: list[dict] = []
+    seen: set[str] = set()
+    kw = " ".join(hn_keywords[:3])
+
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        for batch in ["W25", "S24", "W24"]:
+            try:
+                resp = await http.get(
+                    "https://hn.algolia.com/api/v1/search",
+                    params={"query": f"Launch HN {batch} {kw}", "tags": "story", "hitsPerPage": 20},
+                )
+                hits = resp.json().get("hits", [])
+            except Exception as e:
+                print(f"[yc] {batch}: {e}")
+                continue
+
+            for hit in hits:
+                parsed = parse_launch_hn(hit.get("title", ""))
+                if not parsed or parsed["name"].lower() in seen:
+                    continue
+                seen.add(parsed["name"].lower())
+                story = clean_html(hit.get("story_text", "") or "")
+                companies.append({
+                    "name": parsed["name"],
+                    "website": hit.get("url", ""),
+                    "description": parsed["description"],
+                    "story": story[:400],
+                    "batch": parsed["batch"],
+                })
+
+    print(f"[yc] {len(companies)} companies for: {kw}")
+    return companies
+
+
+async def firecrawl_scrape(url: str) -> str:
+    if not url or not FIRECRAWL_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                headers={"Authorization": f"Bearer {FIRECRAWL_API_KEY}"},
+                json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+            )
+            return resp.json().get("data", {}).get("markdown", "")[:2000]
+    except Exception as e:
+        print(f"[firecrawl] {url}: {e}")
+        return ""
+
+
+async def apollo_find_founder(domain: str) -> dict | None:
+    if not domain or not APOLLO_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(
+                "https://api.apollo.io/api/v1/mixed_people/search",
+                json={
+                    "api_key": APOLLO_API_KEY,
+                    "q_organization_domains": [domain],
+                    "person_titles": ["founder", "co-founder", "ceo", "chief executive officer"],
+                    "page": 1,
+                    "per_page": 3,
+                },
+            )
+            people = resp.json().get("people", [])
+        if not people:
+            return None
+        for p in people:
+            if "founder" in (p.get("title") or "").lower():
+                return p
+        return people[0]
+    except Exception as e:
+        print(f"[apollo] {domain}: {e}")
+        return None
+
+
+async def score_and_brief(company: dict, website: str, contact: dict, icp: dict) -> dict:
+    prompt = f"""ICP:
+{json.dumps(icp, indent=2)}
+
+Company: {company['name']} (YC {company.get('batch', '')})
+Description: {company.get('description', '')}
+Website: {website[:600]}
+Contact: {contact.get('first_name', '')} {contact.get('last_name', '')}, {contact.get('title', '')}
+
+Return JSON only:
+{{
+  "score": <int 0-100>,
+  "reasoning": "<2 sentences: why this is or isn't an ICP fit>",
+  "call_brief": "<3 sentences of cold call intel: what they do, stage, most likely pain>"
+}}"""
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return extract_json(resp.content[0].text)
+    except Exception as e:
+        print(f"[score] {company['name']}: {e}")
+        return {"score": 0, "reasoning": "scoring failed", "call_brief": company.get("description", "")}
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+async def run_pipeline(session_id: str, icp: dict):
+    queue = pipeline_queues[session_id]
+
+    async def emit(etype: str, **kwargs):
+        await queue.put({"type": etype, **kwargs})
+
+    kw = icp.get("hn_keywords", ["saas", "sales"])
+    await emit("status", message=f"Searching YC W25/S24/W24 for: {', '.join(kw)}")
+
+    companies = await search_yc_for_icp(kw)
+    await emit("status", message=f"Found {len(companies)} YC companies. Evaluating matches...")
+
+    good: list[dict] = []
+    checked = 0
+
+    for company in companies:
+        if len(good) >= 5 or checked >= 15:
+            break
+        checked += 1
+        name = company["name"]
+        url = company.get("website", "")
+        domain = extract_domain(url)
+
+        await emit("status", message=f"Researching {name}...")
+        website = await firecrawl_scrape(url)
+
+        await emit("status", message=f"Finding founder at {name} via Apollo...")
+        contact = await apollo_find_founder(domain)
+        if not contact:
+            await emit("status", message=f"  ↳ No founder found, skipping")
+            continue
+
+        cname = f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip()
+        await emit("status", message=f"  ↳ Found {cname} ({contact.get('title', '')})")
+
+        await emit("status", message=f"Scoring ICP fit for {name}...")
+        scored = await score_and_brief(company, website, contact, icp)
+        score = scored.get("score", 0)
+        await emit("status", message=f"  ↳ {score}/100 — {scored.get('reasoning', '')}")
+
+        if score < 55:
+            await emit("status", message=f"  ↳ Below threshold, skipping")
+            continue
+
+        lead_id = str(uuid.uuid4())
+        lead = {
+            "id": lead_id,
+            "company": name,
+            "website": url,
+            "batch": company.get("batch", ""),
+            "contact_name": cname,
+            "contact_role": contact.get("title", "Founder"),
+            "contact_email": contact.get("email", ""),
+            "icp_score": score,
+            "research_summary": scored.get("reasoning", ""),
+            "call_brief": scored.get("call_brief", ""),
+            "status": "sourced",
+        }
+        leads_store[lead_id] = lead
+        good.append(lead)
+        await emit("lead", lead=lead)
+
+    await emit("done", count=len(good))
+
+
+# ── ICP discovery ─────────────────────────────────────────────────────────────
+ICP_SYSTEM = """You are a sharp GTM consultant helping a founder define their Ideal Customer Profile.
+
+Ask ONE focused question per turn to extract:
+- What the product does and its core value
+- Who their best current customers are (industry, company size, role)
+- The specific pain it solves
+- Target company stage and size
+- What a good vs bad customer looks like
+
+After 4-5 exchanges, when you have a clear picture, respond with ONLY this (no other text):
+
+LOCKED_ICP
+{"industry": "...", "stage": "Seed / Series A", "company_size": "1-50 employees", "target_roles": ["co-founder", "ceo"], "pain_points": ["...", "..."], "hn_keywords": ["word1", "word2", "word3"]}
+
+hn_keywords: 2-4 specific words that YC founders building companies matching this ICP would use in their Launch HN titles."""
+
+
+@app.post("/icp/message")
+async def icp_message(body: dict):
+    session_id = body.get("session_id") or str(uuid.uuid4())
+    icp_history.setdefault(session_id, [])
+    icp_history[session_id].append({"role": "user", "content": body.get("message", "")})
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        system=ICP_SYSTEM,
+        messages=icp_history[session_id],
+    )
+    reply = resp.content[0].text
+    icp_history[session_id].append({"role": "assistant", "content": reply})
+
+    locked, icp_data, display = False, None, reply
+    if "LOCKED_ICP" in reply:
+        try:
+            icp_data = extract_json(reply.split("LOCKED_ICP")[1].strip())
+            icp_locked[session_id] = icp_data
+            locked = True
+            display = "Perfect — I have everything I need. Here's your ICP. Ready to find leads."
+        except Exception as e:
+            print(f"[icp] parse error: {e}")
+
+    return {"session_id": session_id, "reply": display, "locked": locked, "icp": icp_data}
+
+
+@app.post("/leads/source")
+async def trigger_sourcing(body: dict):
+    session_id = body.get("session_id")
+    icp = icp_locked.get(session_id)
+    if not icp:
+        return {"error": "ICP not locked"}
+    pipeline_queues[session_id] = asyncio.Queue()
+    asyncio.create_task(run_pipeline(session_id, icp))
+    return {"ok": True}
+
+
+@app.get("/leads/stream/{session_id}")
+async def leads_stream(session_id: str):
+    async def generate():
+        for _ in range(10):
+            if session_id in pipeline_queues:
+                break
+            await asyncio.sleep(0.5)
+        q = pipeline_queues.get(session_id)
+        if not q:
+            yield f"data: {json.dumps({'type': 'error'})}\n\n"
+            return
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=180.0)
+                yield f"data: {json.dumps(ev)}\n\n"
+                if ev.get("type") == "done":
+                    break
+            except asyncio.TimeoutError:
+                break
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/leads")
+async def get_leads():
+    return list(leads_store.values())
+
+
+# ── Cal.com ───────────────────────────────────────────────────────────────────
 async def get_available_slots() -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=8.0) as http:
-            r = await http.get(
-                "https://api.cal.com/v1/event-types",
-                params={"apiKey": CAL_COM_API_KEY},
-            )
+            r = await http.get("https://api.cal.com/v1/event-types", params={"apiKey": CAL_COM_API_KEY})
             event_types = r.json().get("event_types", [])
             if not event_types:
                 return []
-
-            event_type_id = None
-            for et in event_types:
-                slug = et.get("slug", "")
-                if "discovery" in slug or "30" in slug:
-                    event_type_id = et["id"]
-                    break
-            if not event_type_id:
-                event_type_id = event_types[0]["id"]
-
-            now = datetime.now(timezone.utc)
-            end = now + timedelta(days=7)
-
-            r = await http.get(
-                "https://api.cal.com/v1/slots",
-                params={
-                    "apiKey": CAL_COM_API_KEY,
-                    "eventTypeId": event_type_id,
-                    "startTime": now.isoformat(),
-                    "endTime": end.isoformat(),
-                },
+            eid = next(
+                (e["id"] for e in event_types if "discovery" in e.get("slug", "") or "30" in e.get("slug", "")),
+                event_types[0]["id"],
             )
-            slots_data = r.json().get("slots", {})
-
+            now = datetime.now(timezone.utc)
+            r = await http.get("https://api.cal.com/v1/slots", params={
+                "apiKey": CAL_COM_API_KEY, "eventTypeId": eid,
+                "startTime": now.isoformat(), "endTime": (now + timedelta(days=7)).isoformat(),
+            })
             readable = []
-            for date_key in sorted(slots_data.keys()):
-                for slot in slots_data[date_key]:
-                    raw = slot.get("time", "")
-                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                    ct = dt - timedelta(hours=5)
-                    readable.append(ct.strftime("%A %b %d at %-I:%M %p CT"))
+            for dk in sorted(r.json().get("slots", {}).keys()):
+                for slot in r.json()["slots"][dk]:
+                    dt = datetime.fromisoformat(slot["time"].replace("Z", "+00:00")) - timedelta(hours=5)
+                    readable.append(dt.strftime("%A %b %d at %-I:%M %p CT"))
                     if len(readable) >= 3:
                         break
                 if len(readable) >= 3:
                     break
-
             return readable
     except Exception as e:
-        print(f"[cal.com] slot fetch failed: {e}")
+        print(f"[cal] {e}")
         return []
 
 
+# ── Call agent ────────────────────────────────────────────────────────────────
 def build_system_prompt(lead: dict, slots: list[str]) -> str:
-    slots_text = (
-        ", ".join(slots) if slots
-        else "Tuesday or Wednesday this week (check cal.com link for exact times)"
-    )
-    return f"""You are Alex — direct, energetic, and sharp. You work for Rolync, an AI-powered GTM service that helps early-stage founders go from zero pipeline to qualified meetings on their calendar.
+    slots_text = ", ".join(slots) if slots else "Tuesday or Wednesday this week"
+    return f"""You are Alex — direct, energetic, sharp. You work for Rolync, an AI GTM service that helps early-stage founders get qualified meetings on their calendar.
 
 You're calling {lead['name']}, {lead['role']} at {lead['company']}.
 
@@ -108,84 +383,151 @@ INTEL:
 YOUR GOAL: Qualify them, then book a 30-min discovery call.
 
 QUALIFICATION — they're a fit if:
-- Outbound hasn't worked (low reply rates, wrong targeting, gave up on tools)
-- All customers came through warm intros and they need to break out of that
-- They don't have a sharp, tested ICP
+- Outbound hasn't worked or they haven't started it
+- All customers came from warm intros and they need to break out
 - They're doing 5+ hrs/week of sales themselves
 
 CALL FLOW:
 1. Open by referencing their specific situation — not a generic intro
 2. Ask one sharp question at a time to surface the pain
-3. When they show interest, pitch the outcome: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
+3. When they show interest: "We figure out exactly who your best customers are, then book meetings with them. You pay when meetings happen."
 4. Close: ask if they're open to a 30-min call
-5. When they say YES, say: "Perfect — I'm pulling up the calendar right now. I have {slots_text}. Which of those works?"
-6. When they confirm a time, say: "Got it. I have anandabhinav217@gmail.com on file — should I send the booking link there?"
-7. When they confirm the email, say: "Done — sending it over right now."
+5. When YES: "Perfect — I have {slots_text}. Which works?"
+6. When they confirm a time: "Got it. I have {DEMO_EMAIL} on file — should I send the booking link there?"
+7. When they confirm email: "Done — sending it over right now."
 
 RULES:
 - Max 2-3 sentences per turn — this is a phone call
-- Use {lead['name']}'s name naturally, not every turn
 - If they push back once, acknowledge and redirect to the outcome
-- If they're genuinely not interested after 2 tries, exit gracefully: "No worries at all — good luck with the pipeline. If it ever becomes a pain point, you know where to find us." Then say "Take care!" and end.
-- You already know their background. Don't ask questions you already know the answer to.
-- Once you've sent the booking link and they've acknowledged it, say "Perfect — talk soon, {lead['name']}!" and end the call. Do not keep talking.
-"""
+- If genuinely not interested after 2 tries: "No worries — good luck with the pipeline. Take care!" then end.
+- Once booking sent and acknowledged: "Perfect — talk soon, {lead['name']}!" and end."""
 
 
-# ---------------------------------------------------------------------------
-# Email — booking link via ZeptoMail
-# ---------------------------------------------------------------------------
 async def send_email_booking_link(to_email: str):
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.post(
+            await http.post(
                 "https://api.zeptomail.com/v1.1/email",
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Authorization": ZEPTOMAIL_TOKEN,
-                },
+                headers={"Accept": "application/json", "Content-Type": "application/json",
+                         "Authorization": ZEPTOMAIL_TOKEN},
                 json={
                     "from": {"address": "abhinav.anand@rolync.com", "name": "Rolync"},
-                    "to": [{"email_address": {"address": to_email, "name": DEMO_LEAD["name"]}}],
+                    "to": [{"email_address": {"address": to_email, "name": "Founder"}}],
                     "subject": "Your 30-min discovery call with Rolync",
-                    "htmlbody": (
-                        f"<p>Hey {DEMO_LEAD['name']},</p>"
-                        f"<p>Great speaking with you! Here's your booking link for our 30-min discovery call:</p>"
-                        f"<p><a href='{CAL_EVENT_URL}'>{CAL_EVENT_URL}</a></p>"
-                        f"<p>Talk soon,<br><strong>Abhinav Anand</strong><br>Founder & CEO, Rolync<br>+16206999562</p>"
-                    ),
+                    "htmlbody": f"<p>Here's your booking link: <a href='{CAL_EVENT_URL}'>{CAL_EVENT_URL}</a></p><p>— Abhinav, Rolync</p>",
                 },
             )
-        print(f"[email] sent to {to_email} → {r.status_code}: {r.text[:100]}")
     except Exception as e:
-        print(f"[email] failed: {e}")
+        print(f"[email] {e}")
+
+
+async def send_sms_booking_link(to_number: str):
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            await http.post(
+                "https://api.agentphone.ai/v1/messages",
+                headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}", "Content-Type": "application/json"},
+                json={"agent_id": AGENTPHONE_AGENT_ID, "to_number": to_number,
+                      "body": f"Here's your booking link: {CAL_EVENT_URL}"},
+            )
+    except Exception as e:
+        print(f"[sms] {e}")
 
 
 def booking_confirmed(reply: str) -> bool:
-    signals = ["sending it over", "sent it over", "sending you", "sent you",
-               "sending the link", "sent the link"]
-    return any(s in reply.lower() for s in signals)
+    return any(s in reply.lower() for s in
+               ["sending it over", "sent it over", "sending you", "sent you", "sending the link", "sent the link"])
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def health():
     return {"status": "gtm-agent running"}
 
 
+@app.get("/app", response_class=HTMLResponse)
+async def serve_app():
+    with open("static/index.html") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.post("/leads/{lead_id}/call")
+async def call_lead(lead_id: str):
+    lead = leads_store.get(lead_id)
+    if not lead:
+        return {"error": "Lead not found"}
+
+    slots = await get_available_slots()
+    first = lead["contact_name"].split()[0] if lead["contact_name"] else "there"
+    opening = (
+        f"Hey {first}! This is Alex from Rolync. I was just looking at {lead['company']} — "
+        f"really interesting what you're building. Got 60 seconds?"
+    )
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        resp = await http.post(
+            "https://api.agentphone.ai/v1/calls",
+            json={"agentId": AGENTPHONE_AGENT_ID, "toNumber": DEMO_PHONE, "initialGreeting": opening},
+            headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
+        )
+    result = resp.json()
+    call_id = result.get("id")
+
+    if call_id:
+        lead_profile = {
+            "name": first,
+            "company": lead["company"],
+            "role": lead["contact_role"],
+            "background": lead["call_brief"],
+        }
+        call_context[call_id] = {
+            "history": [{"role": "assistant", "content": opening}],
+            "lead": lead_profile,
+            "slots": slots,
+            "phone": DEMO_PHONE,
+            "email": DEMO_EMAIL,
+            "booking_sent": False,
+        }
+        call_streams[call_id] = asyncio.Queue()
+        await call_streams[call_id].put({"role": "assistant", "content": opening})
+        leads_store[lead_id]["status"] = "called"
+        leads_store[lead_id]["call_id"] = call_id
+
+    return {"call_id": call_id}
+
+
+@app.get("/call/{call_id}/stream")
+async def call_stream(call_id: str):
+    async def generate():
+        for _ in range(30):
+            if call_id in call_streams:
+                break
+            await asyncio.sleep(0.5)
+        q = call_streams.get(call_id)
+        if not q:
+            return
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=300.0)
+                yield f"data: {json.dumps(ev)}\n\n"
+                if ev.get("hangup"):
+                    break
+            except asyncio.TimeoutError:
+                break
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.post("/webhook/call")
 async def handle_call(event: dict):
-    event_type = event.get("event")
+    etype = event.get("event")
     channel = event.get("channel", "voice")
     data = event.get("data", {})
     call_id = data.get("callId")
+    print(f"[{etype}] channel={channel} callId={call_id}")
 
-    print(f"[{event_type}] channel={channel} callId={call_id}")
-
-    if event_type == "agent.message" and channel == "voice":
+    if etype == "agent.message" and channel == "voice":
         ctx = call_context.get(call_id)
         if not ctx:
             return {}
@@ -194,39 +536,39 @@ async def handle_call(event: dict):
         ctx["history"].append({"role": "user", "content": user_text})
         print(f"  user: {user_text}")
 
-        system = build_system_prompt(ctx["lead"], ctx["slots"])
-        response = client.messages.create(
+        if call_id in call_streams:
+            asyncio.create_task(call_streams[call_id].put({"role": "user", "content": user_text}))
+
+        resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
-            system=system,
+            system=build_system_prompt(ctx["lead"], ctx["slots"]),
             messages=ctx["history"],
         )
-        reply = response.content[0].text
+        reply = resp.content[0].text
         ctx["history"].append({"role": "assistant", "content": reply})
         call_context[call_id] = ctx
-
         print(f"  agent: {reply}")
 
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
+            asyncio.create_task(send_sms_booking_link(ctx.get("phone", DEMO_PHONE)))
             asyncio.create_task(send_email_booking_link(ctx.get("email", DEMO_EMAIL)))
-            print(f"  [email booking link] → {ctx.get('email', DEMO_EMAIL)}")
 
         hangup_signals = ["talk soon", "take care", "goodbye", "disconnecting", "have a good"]
         should_hangup = ctx["booking_sent"] and any(s in reply.lower() for s in hangup_signals)
 
+        if call_id in call_streams:
+            asyncio.create_task(call_streams[call_id].put({
+                "role": "assistant", "content": reply, "hangup": should_hangup
+            }))
+
         return {"text": reply, "hangup": should_hangup}
 
-    elif event_type == "agent.call_ended":
-        transcript = data.get("transcript", [])
-        duration = data.get("durationSeconds")
-        sentiment = data.get("userSentiment", "unknown")
-        successful = data.get("callSuccessful", False)
-
-        print(f"[call_ended] callId={call_id} duration={duration}s sentiment={sentiment} success={successful}")
-        for turn in transcript:
-            print(f"  {turn.get('role')}: {turn.get('content')}")
-
+    elif etype == "agent.call_ended":
+        print(f"[call_ended] callId={call_id}")
+        if call_id in call_streams:
+            asyncio.create_task(call_streams[call_id].put({"hangup": True, "role": "system", "content": ""}))
         call_context.pop(call_id, None)
         return {}
 
@@ -236,36 +578,22 @@ async def handle_call(event: dict):
 @app.post("/trigger-call")
 async def trigger_call(to: str = DEMO_PHONE):
     slots = await get_available_slots()
-
     opening = (
         f"Hey {DEMO_LEAD['name']}! This is Alex from Rolync. "
         f"I was looking at Dataflow AI — congrats on the pre-seed raise. "
-        f"I work with founders at exactly your stage on a pretty specific problem. "
         f"You got 60 seconds?"
     )
-
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             "https://api.agentphone.ai/v1/calls",
-            json={
-                "agentId": AGENTPHONE_AGENT_ID,
-                "toNumber": to,
-                "initialGreeting": opening,
-            },
+            json={"agentId": AGENTPHONE_AGENT_ID, "toNumber": to, "initialGreeting": opening},
             headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
         )
     result = resp.json()
     call_id = result.get("id")
-
     if call_id:
         call_context[call_id] = {
             "history": [{"role": "assistant", "content": opening}],
-            "lead": DEMO_LEAD,
-            "slots": slots,
-            "phone": to,
-            "email": DEMO_EMAIL,
-            "booking_sent": False,
+            "lead": DEMO_LEAD, "slots": slots, "phone": to, "email": DEMO_EMAIL, "booking_sent": False,
         }
-
-    print(f"[trigger-call] → {to} | callId={call_id} | slots={slots}")
     return result

@@ -3,3 +3,4 @@ uvicorn
 anthropic
 httpx
 python-dotenv
+supermemory

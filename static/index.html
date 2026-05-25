@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rolync — AI GTM Agent</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  * { font-family: 'Inter', sans-serif; }
+  .slide-in { animation: slideIn 0.25s ease-out; }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .pulse-dot { animation: pulseDot 1.5s ease-in-out infinite; }
+  @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Header -->
+<header class="border-b border-gray-800/60 px-6 py-3.5 flex items-center justify-between sticky top-0 bg-gray-950/95 backdrop-blur z-10">
+  <div class="flex items-center gap-2.5">
+    <div class="w-7 h-7 bg-indigo-500 rounded-md flex items-center justify-center text-xs font-bold tracking-tight">R</div>
+    <span class="font-semibold text-white text-sm">Rolync</span>
+  </div>
+  <div class="flex items-center gap-2 text-xs">
+    <span id="s1" class="text-indigo-400 font-medium">ICP Discovery</span>
+    <span class="text-gray-700">›</span>
+    <span id="s2" class="text-gray-600">Lead Sourcing</span>
+    <span class="text-gray-700">›</span>
+    <span id="s3" class="text-gray-600">Live Call</span>
+  </div>
+</header>
+
+<!-- ── View 1: ICP Chat ──────────────────────────────────────────────────── -->
+<div id="view-icp" class="max-w-xl mx-auto px-4 py-8 flex flex-col" style="min-height: calc(100vh - 56px)">
+  <div id="chat-messages" class="flex-1 space-y-4 mb-5 overflow-y-auto">
+    <!-- seed message -->
+    <div class="slide-in flex gap-2.5">
+      <div class="w-7 h-7 bg-indigo-600 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-semibold mt-0.5">AI</div>
+      <div class="bg-gray-800 rounded-2xl rounded-tl-none px-4 py-3 max-w-sm text-sm leading-relaxed text-gray-100">
+        Hey! Let's define who Rolync should be targeting for you. Tell me — what does your product do, and who are the customers you have today?
+      </div>
+    </div>
+  </div>
+
+  <!-- ICP lock card -->
+  <div id="icp-card" class="hidden mb-5 rounded-xl border border-indigo-500/50 bg-indigo-500/8 p-4 slide-in">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="text-indigo-400 text-xs font-semibold uppercase tracking-wide">✓ ICP Locked</span>
+    </div>
+    <div id="icp-details" class="text-sm text-gray-300 space-y-1.5 mb-4"></div>
+    <button onclick="startPipeline()"
+      class="w-full bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold transition-colors">
+      Find Leads →
+    </button>
+  </div>
+
+  <!-- Input -->
+  <div id="input-row" class="flex gap-2">
+    <input id="chat-input" type="text" placeholder="Type your answer..."
+      class="flex-1 bg-gray-800/80 border border-gray-700 rounded-xl px-4 py-3 text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+      onkeydown="if(event.key==='Enter') send()">
+    <button onclick="send()"
+      class="bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl px-5 text-sm font-medium transition-colors">
+      Send
+    </button>
+  </div>
+</div>
+
+<!-- ── View 2: Lead Pipeline ──────────────────────────────────────────────── -->
+<div id="view-leads" class="hidden px-5 py-5" style="height: calc(100vh - 56px)">
+  <div class="flex gap-5 h-full">
+
+    <!-- Activity log -->
+    <div class="w-80 flex-shrink-0 flex flex-col">
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Agent Activity</div>
+      <div id="log" class="flex-1 bg-gray-900 rounded-xl p-3.5 overflow-y-auto font-mono text-xs leading-5 space-y-0.5 text-gray-400 border border-gray-800/50">
+        <div class="text-indigo-400">Starting pipeline...</div>
+      </div>
+    </div>
+
+    <!-- Lead cards -->
+    <div class="flex-1 flex flex-col">
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Leads</div>
+      <div id="cards" class="flex-1 overflow-y-auto space-y-3 pr-0.5">
+        <div id="cards-empty" class="flex items-center justify-center h-full">
+          <div class="text-center text-gray-600 text-sm">
+            <div class="text-2xl mb-2">⚡</div>
+            <div>Finding leads...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── View 3: Call Screen ─────────────────────────────────────────────────── -->
+<div id="view-call" class="hidden max-w-xl mx-auto px-4 py-6 flex flex-col" style="min-height: calc(100vh - 56px)">
+
+  <!-- Lead header -->
+  <div id="call-header" class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4"></div>
+
+  <!-- Status -->
+  <div class="flex items-center gap-2.5 mb-4">
+    <div id="dot" class="w-2.5 h-2.5 bg-green-500 rounded-full pulse-dot"></div>
+    <span id="call-status" class="text-sm text-gray-400">Connecting...</span>
+  </div>
+
+  <!-- Transcript -->
+  <div id="transcript" class="flex-1 overflow-y-auto space-y-3 pr-0.5">
+    <div id="tx-empty" class="text-center text-gray-600 text-sm pt-8">Waiting for call to connect...</div>
+  </div>
+</div>
+
+<script>
+let sessionId = null;
+let lockedIcp = null;
+let activeLead = null;
+
+// ── ICP ───────────────────────────────────────────────────────────────────────
+async function send() {
+  const inp = document.getElementById('chat-input');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  inp.disabled = true;
+
+  addBubble('user', msg);
+
+  const r = await fetch('/icp/message', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId, message: msg}),
+  });
+  const d = await r.json();
+  sessionId = d.session_id;
+  addBubble('agent', d.reply);
+
+  if (d.locked && d.icp) {
+    lockedIcp = d.icp;
+    showIcpCard(d.icp);
+  } else {
+    inp.disabled = false;
+    inp.focus();
+  }
+}
+
+function addBubble(who, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'slide-in flex gap-2.5' + (who === 'user' ? ' justify-end' : '');
+  if (who === 'agent') {
+    wrap.innerHTML = `
+      <div class="w-7 h-7 bg-indigo-600 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-semibold mt-0.5">AI</div>
+      <div class="bg-gray-800 rounded-2xl rounded-tl-none px-4 py-3 max-w-sm text-sm leading-relaxed text-gray-100">${esc(text)}</div>`;
+  } else {
+    wrap.innerHTML = `
+      <div class="bg-indigo-600 rounded-2xl rounded-tr-none px-4 py-3 max-w-sm text-sm leading-relaxed text-white">${esc(text)}</div>`;
+  }
+  const msgs = document.getElementById('chat-messages');
+  msgs.appendChild(wrap);
+  wrap.scrollIntoView({behavior: 'smooth', block: 'end'});
+}
+
+function showIcpCard(icp) {
+  const d = document.getElementById('icp-details');
+  const rows = [
+    ['Industry', icp.industry],
+    ['Stage', icp.stage],
+    ['Size', icp.company_size],
+    ['Roles', (icp.target_roles || []).join(', ')],
+    ['Pain', (icp.pain_points || []).join(' · ')],
+    ['Keywords', (icp.hn_keywords || []).join(', ')],
+  ];
+  d.innerHTML = rows.map(([k, v]) => v
+    ? `<div><span class="text-gray-500">${k}:</span> <span class="text-gray-200">${esc(v)}</span></div>`
+    : '').join('');
+  document.getElementById('icp-card').classList.remove('hidden');
+  document.getElementById('input-row').classList.add('hidden');
+  step(2);
+  document.getElementById('icp-card').scrollIntoView({behavior: 'smooth'});
+}
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
+async function startPipeline() {
+  document.getElementById('view-icp').classList.add('hidden');
+  document.getElementById('view-leads').classList.remove('hidden');
+
+  await fetch('/leads/source', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId}),
+  });
+
+  const es = new EventSource(`/leads/stream/${sessionId}`);
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'status') {
+      addLog(ev.message);
+    } else if (ev.type === 'lead') {
+      addCard(ev.lead);
+    } else if (ev.type === 'done') {
+      addLog(`✓ Done — ${ev.count} leads found`);
+      es.close();
+      step(3);
+    }
+  };
+  es.onerror = () => { addLog('Stream error'); es.close(); };
+}
+
+function addLog(msg) {
+  const log = document.getElementById('log');
+  const el = document.createElement('div');
+  const ts = new Date().toLocaleTimeString('en-US', {hour12: false});
+  el.className = msg.startsWith('✓')
+    ? 'text-green-400'
+    : msg.startsWith('  ↳')
+    ? 'text-gray-600 pl-3'
+    : 'text-gray-300';
+  el.textContent = `${ts}  ${msg}`;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function scoreBadge(s) {
+  if (s >= 80) return 'bg-green-500/15 text-green-400 border border-green-500/30';
+  if (s >= 65) return 'bg-yellow-500/15 text-yellow-400 border border-yellow-500/30';
+  return 'bg-red-500/15 text-red-400 border border-red-500/30';
+}
+
+function addCard(lead) {
+  document.getElementById('cards-empty').remove();
+  const el = document.createElement('div');
+  el.id = `card-${lead.id}`;
+  el.className = 'slide-in bg-gray-900 border border-gray-800 rounded-xl p-4 hover:border-gray-700 transition-colors';
+  el.innerHTML = `
+    <div class="flex items-start justify-between mb-2">
+      <div>
+        <span class="font-semibold text-white text-sm">${esc(lead.company)}</span>
+        <span class="text-xs text-gray-600 ml-1.5">YC ${esc(lead.batch)}</span>
+      </div>
+      <span class="text-xs font-semibold px-2 py-0.5 rounded-md ${scoreBadge(lead.icp_score)}">${lead.icp_score}/100</span>
+    </div>
+    <div class="text-xs text-gray-500 mb-1">${esc(lead.contact_name)} · ${esc(lead.contact_role)}</div>
+    <p class="text-xs text-gray-500 leading-relaxed mb-3">${esc(lead.research_summary)}</p>
+    <button id="btn-${lead.id}" onclick="callLead('${lead.id}')"
+      class="w-full bg-gray-800 hover:bg-indigo-600 border border-gray-700 hover:border-indigo-500 text-gray-400 hover:text-white rounded-lg py-2 text-xs font-medium transition-all">
+      📞 Call ${esc(lead.contact_name.split(' ')[0])}
+    </button>`;
+  document.getElementById('cards').appendChild(el);
+  el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+// ── Call ───────────────────────────────────────────────────────────────────────
+async function callLead(leadId) {
+  const btn = document.getElementById(`btn-${leadId}`);
+  btn.textContent = 'Dialing...';
+  btn.disabled = true;
+  btn.className = btn.className + ' opacity-60 cursor-not-allowed';
+
+  const r = await fetch(`/leads/${leadId}/call`, {method: 'POST'});
+  const d = await r.json();
+
+  if (!d.call_id) {
+    btn.textContent = 'Failed';
+    return;
+  }
+
+  // Get full lead for header
+  const leads = await (await fetch('/leads')).json();
+  activeLead = leads.find(l => l.id === leadId);
+
+  // Switch view
+  document.getElementById('view-leads').classList.add('hidden');
+  document.getElementById('view-call').classList.remove('hidden');
+
+  if (activeLead) {
+    document.getElementById('call-header').innerHTML = `
+      <div class="flex items-center justify-between mb-2">
+        <div>
+          <div class="font-semibold text-white text-sm">${esc(activeLead.company)}</div>
+          <div class="text-xs text-gray-500 mt-0.5">${esc(activeLead.contact_name)} · ${esc(activeLead.contact_role)}</div>
+        </div>
+        <span class="text-xs font-semibold px-2 py-0.5 rounded-md ${scoreBadge(activeLead.icp_score)}">${activeLead.icp_score}/100</span>
+      </div>
+      <p class="text-xs text-gray-600 leading-relaxed">${esc(activeLead.call_brief)}</p>`;
+  }
+
+  const es = new EventSource(`/call/${d.call_id}/stream`);
+  es.onmessage = (e) => {
+    const turn = JSON.parse(e.data);
+    if (turn.content) addTurn(turn.role, turn.content);
+    if (turn.hangup) {
+      document.getElementById('dot').className = 'w-2.5 h-2.5 bg-gray-600 rounded-full';
+      document.getElementById('call-status').textContent = 'Call ended';
+      es.close();
+    } else if (turn.role === 'user') {
+      document.getElementById('call-status').textContent = 'Prospect speaking...';
+    } else if (turn.role === 'assistant') {
+      document.getElementById('call-status').textContent = 'Agent speaking...';
+    }
+  };
+  document.getElementById('call-status').textContent = 'Call in progress';
+}
+
+function addTurn(role, content) {
+  document.getElementById('tx-empty')?.remove();
+  const t = document.getElementById('transcript');
+  const isAgent = role === 'assistant';
+  const el = document.createElement('div');
+  el.className = 'slide-in flex gap-2.5' + (isAgent ? '' : ' justify-end');
+  el.innerHTML = isAgent
+    ? `<div class="w-7 h-7 bg-indigo-600 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-semibold mt-0.5">AI</div>
+       <div class="bg-gray-800 rounded-2xl rounded-tl-none px-4 py-3 max-w-xs text-sm leading-relaxed">${esc(content)}</div>`
+    : `<div class="bg-gray-700 rounded-2xl rounded-tr-none px-4 py-3 max-w-xs text-sm leading-relaxed">${esc(content)}</div>`;
+  t.appendChild(el);
+  t.scrollTop = t.scrollHeight;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function step(n) {
+  const labels = ['ICP Discovery', 'Lead Sourcing', 'Live Call'];
+  for (let i = 1; i <= 3; i++) {
+    const el = document.getElementById(`s${i}`);
+    el.className = i < n
+      ? 'text-gray-600 line-through'
+      : i === n
+      ? 'text-indigo-400 font-medium'
+      : 'text-gray-600';
+  }
+}
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
