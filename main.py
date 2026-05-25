@@ -765,30 +765,38 @@ async def handle_call(event: dict):
     channel = event.get("channel", "voice")
     data = event.get("data", {})
     call_id = data.get("callId")
-    print(f"[{etype}] channel={channel} callId={call_id}")
+    print(f"[webhook] event={etype} channel={channel} callId={call_id}")
 
     if etype == "agent.message" and channel == "voice":
         ctx = call_context.get(call_id)
         if not ctx:
+            print(f"[webhook] no context for callId={call_id} — ignoring")
             return {}
 
         user_text = data.get("transcript", "")
         ctx["history"].append({"role": "user", "content": user_text})
-        print(f"  user: {user_text}")
+        print(f"  user: {user_text[:120]}")
 
         if call_id in call_streams:
             asyncio.create_task(call_streams[call_id].put({"role": "user", "content": user_text}))
 
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            system=build_system_prompt(ctx["lead"], ctx["slots"]),
-            messages=ctx["history"],
-        )
-        reply = resp.content[0].text
+        try:
+            def _llm():
+                return client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=200,
+                    system=build_system_prompt(ctx["lead"], ctx["slots"]),
+                    messages=ctx["history"],
+                )
+            resp = await asyncio.to_thread(_llm)
+            reply = resp.content[0].text
+        except Exception as e:
+            print(f"[webhook] Anthropic error: {e}")
+            reply = "Sorry, one moment."
+
         ctx["history"].append({"role": "assistant", "content": reply})
         call_context[call_id] = ctx
-        print(f"  agent: {reply}")
+        print(f"  agent: {reply[:120]}")
 
         if booking_confirmed(reply) and not ctx["booking_sent"]:
             ctx["booking_sent"] = True
@@ -803,7 +811,11 @@ async def handle_call(event: dict):
                 "role": "assistant", "content": reply, "hangup": should_hangup
             }))
 
-        return {"text": reply, "hangup": should_hangup}
+        # AgentPhone requires application/x-ndjson — plain JSON is silently ignored
+        payload = json.dumps({"text": reply, "hangup": should_hangup})
+        async def _ndjson():
+            yield payload + "\n"
+        return StreamingResponse(_ndjson(), media_type="application/x-ndjson")
 
     elif etype == "agent.call_ended":
         print(f"[call_ended] callId={call_id}")
