@@ -23,6 +23,7 @@ CAL_EVENT_URL       = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-
 ZEPTOMAIL_TOKEN     = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
 APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "").strip()
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "").strip()
+LINKD_API_KEY       = os.getenv("linkdAPI", "").strip()
 
 DEMO_PHONE = "+12142184795"
 DEMO_EMAIL = "anandabhinav217@gmail.com"
@@ -269,13 +270,13 @@ async def run_pipeline(session_id: str, icp: dict):
     await emit("status", message=f"Searching YC W25/S24/W24 for: {', '.join(kw)}")
 
     companies = await search_yc_for_icp(kw)
-    await emit("status", message=f"Found {len(companies)} YC companies. Evaluating matches...")
+    await emit("status", message=f"Found {len(companies)} YC companies. Finding the best match...")
 
     good: list[dict] = []
     checked = 0
 
     for company in companies:
-        if len(good) >= 5 or checked >= 15:
+        if len(good) >= 1 or checked >= 5:
             break
         checked += 1
         name = company["name"]
