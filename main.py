@@ -761,11 +761,12 @@ async def call_stream(call_id: str):
 
 @app.post("/webhook/call")
 async def handle_call(event: dict):
+    print(f"[webhook] RAW: {json.dumps(event)[:600]}")
     etype = event.get("event")
     channel = event.get("channel", "voice")
     data = event.get("data", {})
     call_id = data.get("callId")
-    print(f"[webhook] event={etype} channel={channel} callId={call_id}")
+    print(f"[webhook] event={etype} channel={channel} callId={call_id} ctx_keys={list(call_context.keys())}")
 
     if etype == "agent.message" and channel == "voice":
         ctx = call_context.get(call_id)
