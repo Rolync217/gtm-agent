@@ -23,7 +23,6 @@ CAL_EVENT_URL       = os.getenv("CAL_EVENT_URL", "https://cal.com/abhinav-anand-
 ZEPTOMAIL_TOKEN     = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
 APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "").strip()
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "").strip()
-LINKD_API_KEY       = os.getenv("linkdAPI", "").strip()
 
 DEMO_PHONE = "+12142184795"
 DEMO_EMAIL = "anandabhinav217@gmail.com"
@@ -59,278 +58,316 @@ def extract_json(text: str) -> dict:
     return json.loads(text)
 
 
-def parse_launch_hn(title: str) -> dict | None:
-    m = re.match(r"Launch HN:\s*(.+?)\s*\(YC\s*([WS]\d{2})\)\s*[–—-]+\s*(.+)", title, re.IGNORECASE)
-    if not m:
-        return None
-    return {"name": m.group(1).strip(), "batch": m.group(2).upper(), "description": m.group(3).strip()}
+# ── MCP tool imports ──────────────────────────────────────────────────────────
+from mcp_server.tools.firecrawl_v2 import search_web as _fc_search, scrape_web_page as _fc_scrape
+from mcp_server.tools.yc_algolia import search_yc_companies
+from mcp_server.tools.linkdapi import (
+    search_people as _ld_search_people,
+    get_profile as _ld_get_profile,
+    get_profile_posts as _ld_get_posts,
+    find_company_id as _ld_company_id,
+    get_company_posts as _ld_company_posts,
+)
+from mcp_server.tools.apollo import find_person_by_name as _ap_find_person
 
 
-def clean_html(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"&#x2F;", "/", text)
-    text = re.sub(r"&amp;", "&", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def extract_domain(url: str) -> str:
-    if not url:
-        return ""
-    url = re.sub(r"^https?://", "", url)
-    url = re.sub(r"^www\.", "", url)
-    return url.split("/")[0].split("?")[0]
-
-
-# ── External API clients ──────────────────────────────────────────────────────
-async def search_yc_for_icp(hn_keywords: list[str]) -> list[dict]:
-    companies: list[dict] = []
-    seen: set[str] = set()
-
-    # Build queries: one broad per batch + one per keyword per batch
-    # Broad catches all recent YC companies; keywords boost relevant ones to the top
-    queries: list[str] = []
-    for batch in ["W25", "S24", "W24"]:
-        queries.append(f"Launch HN {batch}")          # broad
-        for kw in hn_keywords[:3]:
-            queries.append(f"Launch HN {batch} {kw}") # keyword-specific
-
-    async with httpx.AsyncClient(timeout=15.0) as http:
-        for query in queries:
-            try:
-                resp = await http.get(
-                    "https://hn.algolia.com/api/v1/search",
-                    params={"query": query, "tags": "story", "hitsPerPage": 20},
-                )
-                hits = resp.json().get("hits", [])
-            except Exception as e:
-                print(f"[yc] query='{query}': {e}")
-                continue
-
-            for hit in hits:
-                parsed = parse_launch_hn(hit.get("title", ""))
-                if not parsed or parsed["name"].lower() in seen:
-                    continue
-                seen.add(parsed["name"].lower())
-                story = clean_html(hit.get("story_text", "") or "")
-                companies.append({
-                    "name": parsed["name"],
-                    "website": hit.get("url", ""),
-                    "description": parsed["description"],
-                    "story": story[:400],
-                    "batch": parsed["batch"],
-                })
-
-    print(f"[yc] {len(companies)} companies across {len(queries)} queries")
-    return companies
-
-
-async def firecrawl_scrape(url: str) -> str:
-    if not url or not FIRECRAWL_API_KEY:
-        return ""
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(
-                "https://api.firecrawl.dev/v1/scrape",
-                headers={"Authorization": f"Bearer {FIRECRAWL_API_KEY}"},
-                json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
-            )
-            return resp.json().get("data", {}).get("markdown", "")[:2000]
-    except Exception as e:
-        print(f"[firecrawl] {url}: {e}")
-        return ""
-
-
-async def apollo_find_founder(domain: str) -> dict | None:
-    if not domain or not APOLLO_API_KEY:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            resp = await http.post(
-                "https://api.apollo.io/api/v1/mixed_people/search",
-                json={
-                    "api_key": APOLLO_API_KEY,
-                    "q_organization_domains": [domain],
-                    "person_titles": ["founder", "co-founder", "ceo", "chief executive officer"],
-                    "page": 1,
-                    "per_page": 3,
+# ── Agent tool definitions ────────────────────────────────────────────────────
+AGENT_TOOLS = [
+    {
+        "name": "search_yc_companies",
+        "description": "Search HN Algolia for YC companies matching ICP keywords. Call this first to get a list of candidates.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keywords": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "2-4 product-category keywords from the ICP, e.g. ['saas', 'b2b', 'workflow']"
                 },
-            )
-            people = resp.json().get("people", [])
-        if not people:
-            return None
-        for p in people:
-            if "founder" in (p.get("title") or "").lower():
-                return p
-        return people[0]
-    except Exception as e:
-        print(f"[apollo] {domain}: {e}")
-        return None
+                "batches": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "YC batches to search, defaults to ['W25', 'S24', 'W24']"
+                },
+            },
+            "required": ["keywords"],
+        },
+    },
+    {
+        "name": "scrape_website",
+        "description": "Scrape a company website to understand what they build and who they serve.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to scrape"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "search_web",
+        "description": "Search the web via Firecrawl. Use for founder Twitter/X posts, news articles, funding announcements, or any public signals.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query string"},
+                "limit": {"type": "integer", "description": "Number of results, 1-10, default 5"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_linkedin_people",
+        "description": "Search LinkedIn for a person by name + company. Returns username and URN needed for other LinkedIn tools.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "Full name to search, e.g. 'Jane Smith'"},
+                "company": {"type": "string", "description": "Company name filter"},
+                "title": {"type": "string", "description": "Title filter, e.g. 'founder' or 'ceo'"},
+            },
+            "required": ["keyword"],
+        },
+    },
+    {
+        "name": "get_linkedin_profile",
+        "description": "Get a founder's full LinkedIn profile: headline, summary, experience, follower count.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "LinkedIn username from search_linkedin_people"},
+            },
+            "required": ["username"],
+        },
+    },
+    {
+        "name": "get_founder_linkedin_posts",
+        "description": "Get a founder's recent LinkedIn posts. Reveals what they're thinking about, pain points, announcements.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "urn": {"type": "string", "description": "Profile URN from search_linkedin_people or get_linkedin_profile"},
+                "limit": {"type": "integer", "description": "Max posts to return, default 5"},
+            },
+            "required": ["urn"],
+        },
+    },
+    {
+        "name": "get_company_linkedin_posts",
+        "description": "Get a company's recent LinkedIn posts. Good for understanding their messaging, product focus, and stage.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company_name": {"type": "string", "description": "Company name to look up"},
+            },
+            "required": ["company_name"],
+        },
+    },
+    {
+        "name": "find_founder_contact",
+        "description": "Find a founder's email and contact info via Apollo. Use after you know their first and last name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "first_name": {"type": "string"},
+                "last_name": {"type": "string"},
+                "organization_name": {"type": "string", "description": "Company name"},
+                "domain": {"type": "string", "description": "Company website domain, e.g. acme.com"},
+            },
+            "required": ["first_name", "last_name"],
+        },
+    },
+    {
+        "name": "submit_lead",
+        "description": "Submit the researched lead. Call this when you have enough context for a real cold call. This ends the research.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string"},
+                "website": {"type": "string"},
+                "batch": {"type": "string", "description": "YC batch e.g. W25"},
+                "contact_name": {"type": "string", "description": "Founder full name"},
+                "contact_role": {"type": "string", "description": "Founder title"},
+                "contact_email": {"type": "string"},
+                "contact_linkedin": {"type": "string"},
+                "icp_score": {"type": "integer", "description": "Your ICP fit score 0-100"},
+                "research_summary": {"type": "string", "description": "2-3 sentences on why this company fits the ICP"},
+                "call_brief": {"type": "string", "description": "3-4 sentences of specific intel for the cold call: what they build, stage, likely pain, one signal to reference in opening"},
+            },
+            "required": ["company", "contact_name", "icp_score", "research_summary", "call_brief"],
+        },
+    },
+]
 
 
-# ── LinkdAPI ──────────────────────────────────────────────────────────────────
-_linkdapi_last: float = 0.0
-
-async def _linkdapi_get(http: httpx.AsyncClient, path: str, params: dict) -> dict:
-    global _linkdapi_last
-    elapsed = asyncio.get_event_loop().time() - _linkdapi_last
-    if elapsed < 9.0:                      # stay under 7 req/min
-        await asyncio.sleep(9.0 - elapsed)
-    resp = await http.get(
-        f"https://linkdapi.com{path}",
-        params=params,
-        headers={"X-linkdapi-apikey": LINKD_API_KEY},
-    )
-    _linkdapi_last = asyncio.get_event_loop().time()
-    return resp.json()
-
-
-async def linkdapi_company_intel(company_name: str, founder_linkedin_url: str = "") -> str:
-    if not LINKD_API_KEY:
-        return ""
-    signals: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=12.0) as http:
-            # Step 1: find company ID
-            data = await _linkdapi_get(http, "/api/v1/search/companies", {"keyword": company_name})
-            items = (data.get("data") or {})
-            if isinstance(items, dict):
-                items = items.get("items") or []
-            if not items:
-                return ""
-            company_id = items[0].get("companyID") or items[0].get("id") or ""
-            if not company_id:
-                return ""
-
-            # Step 2: company LinkedIn posts
-            data = await _linkdapi_get(http, "/api/v1/companies/company/posts", {"id": str(company_id)})
-            posts_raw = data.get("data") or []
-            if isinstance(posts_raw, dict):
-                posts_raw = posts_raw.get("data") or posts_raw.get("items") or []
-            post_texts = []
-            for p in posts_raw[:5]:
-                t = p.get("text") or p.get("commentary") or p.get("description") or ""
-                if t and len(t) > 20:
-                    post_texts.append(t[:250])
-            if post_texts:
-                signals.append("LinkedIn posts: " + " | ".join(post_texts))
-
-            # Step 3: founder profile if LinkedIn URL available
-            if founder_linkedin_url and "/in/" in founder_linkedin_url:
-                username = founder_linkedin_url.rstrip("/").split("/in/")[-1].split("?")[0].rstrip("/")
-                if username:
-                    data = await _linkdapi_get(http, "/api/v1/profile/overview", {"username": username})
-                    p = data.get("data") or {}
-                    headline = p.get("headline") or p.get("title") or ""
-                    about = p.get("about") or p.get("summary") or ""
-                    if headline or about:
-                        signals.append(f"Founder profile: {headline} | {about[:300]}")
-
-    except Exception as e:
-        print(f"[linkdapi] {company_name}: {e}")
-
-    return "\n".join(signals)
-
-
-async def score_and_brief(company: dict, website: str, contact: dict, linkedin: str, icp: dict) -> dict:
-    prompt = f"""ICP:
-{json.dumps(icp, indent=2)}
-
-Company: {company['name']} (YC {company.get('batch', '')})
-Description: {company.get('description', '')}
-Website content: {website[:500]}
-LinkedIn signals: {linkedin[:600] if linkedin else 'none'}
-Contact: {contact.get('first_name', '')} {contact.get('last_name', '')}, {contact.get('title', '')}
-
-Return JSON only:
-{{
-  "score": <int 0-100>,
-  "reasoning": "<2 sentences: why this is or isn't an ICP fit, cite LinkedIn signals if useful>",
-  "call_brief": "<3 sentences of cold call intel: what they do, stage, most likely pain point>"
-}}"""
-    try:
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
+# ── Agent tool executor ───────────────────────────────────────────────────────
+async def execute_tool(name: str, inputs: dict) -> str:
+    if name == "search_yc_companies":
+        result = await asyncio.to_thread(
+            search_yc_companies, inputs["keywords"], inputs.get("batches")
         )
-        return extract_json(resp.content[0].text)
-    except Exception as e:
-        print(f"[score] {company['name']}: {e}")
-        return {"score": 0, "reasoning": "scoring failed", "call_brief": company.get("description", "")}
+        return json.dumps(result)
+
+    elif name == "scrape_website":
+        result = await asyncio.to_thread(_fc_scrape, inputs["url"])
+        return json.dumps({"markdown": (result.get("markdown") or "")[:3000]})
+
+    elif name == "search_web":
+        result = await asyncio.to_thread(_fc_search, inputs["query"], inputs.get("limit", 5))
+        return json.dumps(result)
+
+    elif name == "search_linkedin_people":
+        result = await asyncio.to_thread(
+            _ld_search_people, inputs["keyword"], inputs.get("company", ""), inputs.get("title", "")
+        )
+        return json.dumps(result)
+
+    elif name == "get_linkedin_profile":
+        result = await asyncio.to_thread(_ld_get_profile, inputs["username"])
+        return json.dumps(result)
+
+    elif name == "get_founder_linkedin_posts":
+        result = await asyncio.to_thread(_ld_get_posts, inputs["urn"], inputs.get("limit", 5))
+        return json.dumps(result)
+
+    elif name == "get_company_linkedin_posts":
+        company_id = await asyncio.to_thread(_ld_company_id, inputs["company_name"])
+        if not company_id:
+            return json.dumps({"error": "Company not found on LinkedIn"})
+        result = await asyncio.to_thread(_ld_company_posts, company_id)
+        return json.dumps(result)
+
+    elif name == "find_founder_contact":
+        result = await asyncio.to_thread(
+            _ap_find_person,
+            inputs["first_name"], inputs["last_name"],
+            inputs.get("organization_name", ""), inputs.get("domain", ""),
+        )
+        return json.dumps(result or {"error": "Not found in Apollo"})
+
+    return json.dumps({"error": f"Unknown tool: {name}"})
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
+AGENT_SYSTEM = """You are a GTM research agent. Your job: find ONE company that fits the ICP, research them deeply, then call submit_lead.
+
+ICP:
+{icp}
+
+GOAL: Build enough context about the founder and company to have a real, specific cold call — not a generic pitch.
+
+SUGGESTED WORKFLOW (adapt as needed):
+1. search_yc_companies with the ICP keywords to get candidates
+2. Pick the most promising company from the results based on description
+3. scrape_website to understand what they actually build
+4. search_linkedin_people to find the founder, then get_linkedin_profile + get_founder_linkedin_posts
+5. get_company_linkedin_posts for company signals and messaging
+6. search_web for founder Twitter/X posts, news, funding announcements
+7. find_founder_contact (Apollo) to get their email
+8. submit_lead with everything you found
+
+RULES:
+- Research only 1 company — the best ICP fit from search results
+- The call_brief must be specific: what they build, their stage, one signal that proves you did homework
+- You have enough when you can fill submit_lead confidently"""
+
+
 async def run_pipeline(session_id: str, icp: dict):
     queue = pipeline_queues[session_id]
 
     async def emit(etype: str, **kwargs):
         await queue.put({"type": etype, **kwargs})
 
-    kw = icp.get("hn_keywords", ["saas", "sales"])
-    await emit("status", message=f"Searching YC W25/S24/W24 for: {', '.join(kw)}")
+    await emit("status", message="Agent starting research...")
 
-    companies = await search_yc_for_icp(kw)
-    await emit("status", message=f"Found {len(companies)} YC companies. Finding the best match...")
+    system = AGENT_SYSTEM.format(icp=json.dumps(icp, indent=2))
+    messages: list[dict] = [{"role": "user", "content": "Find and research one qualified company now."}]
+    lead_submitted = False
 
-    good: list[dict] = []
-    checked = 0
-
-    for company in companies:
-        if len(good) >= 1 or checked >= 5:
+    for iteration in range(25):
+        if lead_submitted:
             break
-        checked += 1
-        name = company["name"]
-        url = company.get("website", "")
-        domain = extract_domain(url)
 
-        await emit("status", message=f"Researching {name}...")
-        website = await firecrawl_scrape(url)
+        def _call():
+            return client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system,
+                tools=AGENT_TOOLS,
+                messages=messages,
+            )
 
-        await emit("status", message=f"Finding founder at {name} via Apollo...")
-        contact = await apollo_find_founder(domain)
-        if not contact:
-            await emit("status", message=f"  ↳ No founder found, skipping")
-            continue
+        try:
+            resp = await asyncio.to_thread(_call)
+        except Exception as e:
+            await emit("status", message=f"Agent error: {e}")
+            break
 
-        cname = f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip()
-        await emit("status", message=f"  ↳ Found {cname} ({contact.get('title', '')})")
+        messages.append({"role": "assistant", "content": resp.content})
 
-        await emit("status", message=f"Checking LinkedIn signals for {name}...")
-        linkedin_intel = await linkdapi_company_intel(name, contact.get("linkedin_url", ""))
-        if linkedin_intel:
-            preview = linkedin_intel[:120].replace("\n", " ")
-            await emit("status", message=f"  ↳ {preview}...")
-        else:
-            await emit("status", message=f"  ↳ No LinkedIn data found")
+        if resp.stop_reason == "end_turn":
+            break
 
-        await emit("status", message=f"Scoring ICP fit for {name}...")
-        scored = await score_and_brief(company, website, contact, linkedin_intel, icp)
-        score = scored.get("score", 0)
-        await emit("status", message=f"  ↳ {score}/100 — {scored.get('reasoning', '')}")
+        tool_results = []
+        for block in resp.content:
+            if not hasattr(block, "type") or block.type != "tool_use":
+                continue
 
-        if score < 55:
-            await emit("status", message=f"  ↳ Below threshold, skipping")
-            continue
+            name = block.name
+            inputs = block.input
 
-        lead_id = str(uuid.uuid4())
-        lead = {
-            "id": lead_id,
-            "company": name,
-            "website": url,
-            "batch": company.get("batch", ""),
-            "contact_name": cname,
-            "contact_role": contact.get("title", "Founder"),
-            "contact_email": contact.get("email", ""),
-            "icp_score": score,
-            "research_summary": scored.get("reasoning", ""),
-            "call_brief": scored.get("call_brief", ""),
-            "status": "sourced",
-        }
-        leads_store[lead_id] = lead
-        good.append(lead)
-        await emit("lead", lead=lead)
+            # Emit a human-readable status for each tool call
+            status_map = {
+                "search_yc_companies": f"Searching YC for: {', '.join(inputs.get('keywords', []))}",
+                "scrape_website":      f"Scraping {inputs.get('url', '')}...",
+                "search_web":          f"Searching: {inputs.get('query', '')}",
+                "search_linkedin_people": f"Looking up {inputs.get('keyword', '')} on LinkedIn...",
+                "get_linkedin_profile":   f"Fetching LinkedIn profile @{inputs.get('username', '')}...",
+                "get_founder_linkedin_posts": "Fetching founder's LinkedIn posts...",
+                "get_company_linkedin_posts": f"Fetching {inputs.get('company_name', '')} LinkedIn posts...",
+                "find_founder_contact": f"Finding contact for {inputs.get('first_name', '')} {inputs.get('last_name', '')} via Apollo...",
+                "submit_lead":         f"Submitting lead: {inputs.get('company', '')}",
+            }
+            if name in status_map:
+                await emit("status", message=status_map[name])
 
-    await emit("done", count=len(good))
+            if name == "submit_lead":
+                lead_id = str(uuid.uuid4())
+                lead = {
+                    "id":               lead_id,
+                    "company":          inputs.get("company", ""),
+                    "website":          inputs.get("website", ""),
+                    "batch":            inputs.get("batch", ""),
+                    "contact_name":     inputs.get("contact_name", ""),
+                    "contact_role":     inputs.get("contact_role", "Founder"),
+                    "contact_email":    inputs.get("contact_email", ""),
+                    "contact_linkedin": inputs.get("contact_linkedin", ""),
+                    "icp_score":        inputs.get("icp_score", 0),
+                    "research_summary": inputs.get("research_summary", ""),
+                    "call_brief":       inputs.get("call_brief", ""),
+                    "status":           "sourced",
+                }
+                leads_store[lead_id] = lead
+                await emit("lead", lead=lead)
+                lead_submitted = True
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps({"ok": True, "lead_id": lead_id}),
+                })
+            else:
+                try:
+                    result = await execute_tool(name, inputs)
+                except Exception as e:
+                    result = json.dumps({"error": str(e)})
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+
+    await emit("done", count=1 if lead_submitted else 0)
 
 
 # ── ICP discovery ─────────────────────────────────────────────────────────────
