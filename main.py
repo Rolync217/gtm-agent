@@ -84,18 +84,25 @@ def extract_domain(url: str) -> str:
 async def search_yc_for_icp(hn_keywords: list[str]) -> list[dict]:
     companies: list[dict] = []
     seen: set[str] = set()
-    kw = " ".join(hn_keywords[:3])
+
+    # Build queries: one broad per batch + one per keyword per batch
+    # Broad catches all recent YC companies; keywords boost relevant ones to the top
+    queries: list[str] = []
+    for batch in ["W25", "S24", "W24"]:
+        queries.append(f"Launch HN {batch}")          # broad
+        for kw in hn_keywords[:3]:
+            queries.append(f"Launch HN {batch} {kw}") # keyword-specific
 
     async with httpx.AsyncClient(timeout=15.0) as http:
-        for batch in ["W25", "S24", "W24"]:
+        for query in queries:
             try:
                 resp = await http.get(
                     "https://hn.algolia.com/api/v1/search",
-                    params={"query": f"Launch HN {batch} {kw}", "tags": "story", "hitsPerPage": 20},
+                    params={"query": query, "tags": "story", "hitsPerPage": 20},
                 )
                 hits = resp.json().get("hits", [])
             except Exception as e:
-                print(f"[yc] {batch}: {e}")
+                print(f"[yc] query='{query}': {e}")
                 continue
 
             for hit in hits:
@@ -112,7 +119,7 @@ async def search_yc_for_icp(hn_keywords: list[str]) -> list[dict]:
                     "batch": parsed["batch"],
                 })
 
-    print(f"[yc] {len(companies)} companies for: {kw}")
+    print(f"[yc] {len(companies)} companies across {len(queries)} queries")
     return companies
 
 
@@ -267,7 +274,7 @@ After 4-5 exchanges, when you have a clear picture, respond with ONLY this (no o
 LOCKED_ICP
 {"industry": "...", "stage": "Seed / Series A", "company_size": "1-50 employees", "target_roles": ["co-founder", "ceo"], "pain_points": ["...", "..."], "hn_keywords": ["word1", "word2", "word3"]}
 
-hn_keywords: 2-4 specific words that YC founders building companies matching this ICP would use in their Launch HN titles."""
+hn_keywords: 2-4 words describing what the TARGET COMPANIES BUILD (their product category), not the pain you solve for them. These appear in Launch HN post titles like "AI-powered [keyword]" or "[keyword] platform for [audience]". Example: if targeting B2B SaaS founders, use ["saas", "b2b", "workflow"] not ["outbound", "pipeline"]."""
 
 
 @app.post("/icp/message")
