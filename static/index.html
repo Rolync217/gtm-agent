@@ -24,6 +24,8 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .step-fade-in { animation: stepFade 0.18s ease-out; }
   @keyframes stepFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+  .fade-out { animation: fadeOut 0.18s ease-out forwards; }
 </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
@@ -91,39 +93,18 @@
 </div>
 
 <!-- ── View 2: Lead Pipeline ──────────────────────────────────────────────── -->
-<div id="view-leads" class="hidden px-5 py-5" style="height: calc(100vh - 56px)">
-  <div class="flex gap-5 h-full">
+<div id="view-leads" class="hidden" style="height: calc(100vh - 56px)">
+  <div class="flex flex-col items-center justify-center h-full">
 
-    <!-- Activity panel -->
-    <div class="w-72 flex-shrink-0 flex flex-col">
-      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Agent Activity</div>
-      <div id="step-display" class="flex-1 bg-gray-900 rounded-xl border border-gray-800/50 flex flex-col items-center justify-center p-6 text-center gap-4">
-        <div id="step-spinner" class="spinner"></div>
-        <div id="step-text" class="text-sm text-gray-300 leading-relaxed"></div>
-        <div id="step-count" class="text-xs text-gray-700"></div>
-      </div>
+    <!-- Centered step display while agent runs -->
+    <div id="step-display" class="flex flex-col items-center gap-5 text-center px-8" style="max-width:360px; width:100%">
+      <div id="step-spinner" class="spinner" style="width:22px;height:22px"></div>
+      <div id="step-text" class="text-sm text-gray-200 leading-relaxed"></div>
+      <div id="step-count" class="text-xs text-gray-700"></div>
     </div>
 
-    <!-- Lead cards -->
-    <div class="flex-1 flex flex-col">
-      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Leads</div>
-      <div id="cards" class="flex-1 overflow-y-auto space-y-3 pr-0.5">
-        <div id="cards-empty">
-          <div class="animate-pulse bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div class="flex items-start justify-between mb-3">
-              <div class="h-4 bg-gray-800 rounded w-36"></div>
-              <div class="h-5 bg-gray-800 rounded w-14"></div>
-            </div>
-            <div class="h-3 bg-gray-800 rounded w-44 mb-3"></div>
-            <div class="space-y-2 mb-4">
-              <div class="h-3 bg-gray-800 rounded w-full"></div>
-              <div class="h-3 bg-gray-800 rounded w-5/6"></div>
-              <div class="h-3 bg-gray-800 rounded w-3/4"></div>
-            </div>
-            <div class="h-8 bg-gray-800 rounded-lg w-full"></div>
-          </div>
-        </div>
-      </div>
+    <!-- Vertical lead cards (hidden until first lead arrives) -->
+    <div id="cards" class="flex flex-col items-center gap-4 overflow-y-auto px-5 py-4 w-full" style="display:none; max-height:calc(100vh - 112px)">
     </div>
 
   </div>
@@ -366,13 +347,32 @@ async function startPipeline() {
 let _stepCount = 0;
 
 function showStep(msg) {
-  const spinner = document.getElementById('step-spinner');
-  const textEl  = document.getElementById('step-text');
-  const countEl = document.getElementById('step-count');
+  const spinner    = document.getElementById('step-spinner');
+  const textEl     = document.getElementById('step-text');
+  const countEl    = document.getElementById('step-count');
+  const stepDisplay = document.getElementById('step-display');
+  const cardsEl    = document.getElementById('cards');
   if (!textEl) return;
 
   const isDone  = msg.startsWith('✓');
   const isError = msg.toLowerCase().includes('error');
+
+  // If cards are already showing, render done/error as a small tag above them
+  const cardsVisible = cardsEl && cardsEl.style.display !== 'none';
+  if ((isDone || isError) && cardsVisible) {
+    let badge = document.getElementById('pipeline-done');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'pipeline-done';
+      badge.className = 'step-fade-in text-xs flex-shrink-0';
+      badge.style.maxWidth = '440px';
+      badge.style.width = '100%';
+      cardsEl.insertBefore(badge, cardsEl.firstChild);
+    }
+    badge.className = `step-fade-in text-xs flex-shrink-0 ${isDone ? 'text-green-500' : 'text-red-400'}`;
+    badge.textContent = msg;
+    return;
+  }
 
   if (isDone || isError) {
     if (spinner) spinner.style.display = 'none';
@@ -386,7 +386,7 @@ function showStep(msg) {
     if (countEl && _stepCount > 1) {
       countEl.textContent = `${_stepCount - 1} step${_stepCount > 2 ? 's' : ''} completed`;
     }
-    textEl.className = 'text-sm text-gray-300 leading-relaxed';
+    textEl.className = 'text-sm text-gray-200 leading-relaxed';
     _typewriter(textEl, msg);
   }
 }
@@ -409,23 +409,33 @@ function scoreBadge(s) {
 }
 
 function addCard(lead) {
-  document.getElementById('cards-empty').remove();
+  // Fade out step display, reveal cards column
+  const stepDisplay = document.getElementById('step-display');
+  const cardsEl = document.getElementById('cards');
+  if (stepDisplay && stepDisplay.style.display !== 'none') {
+    stepDisplay.classList.add('fade-out');
+    setTimeout(() => { stepDisplay.style.display = 'none'; }, 200);
+  }
+  if (cardsEl) cardsEl.style.display = 'flex';
+
+  const first = lead.contact_name ? lead.contact_name.split(' ')[0] : 'Founder';
   const el = document.createElement('div');
   el.id = `card-${lead.id}`;
-  el.className = 'slide-in bg-gray-900 border border-gray-800 rounded-xl p-4 hover:border-gray-700 transition-colors';
+  el.className = 'slide-in bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-700 transition-colors flex-shrink-0 w-full';
+  el.style.maxWidth = '440px';
   el.innerHTML = `
     <div class="flex items-start justify-between mb-2">
       <div>
-        <span class="font-semibold text-white text-sm">${esc(lead.company)}</span>
-        <span class="text-xs text-gray-600 ml-1.5">YC ${esc(lead.batch)}</span>
+        <div class="font-semibold text-white text-base leading-tight">${esc(lead.company)}</div>
+        <div class="text-xs text-gray-600 mt-0.5">YC ${esc(lead.batch || '—')}</div>
       </div>
-      <span class="text-xs font-semibold px-2 py-0.5 rounded-md ${scoreBadge(lead.icp_score)}">${lead.icp_score}/100</span>
+      <span class="text-xs font-semibold px-2 py-0.5 rounded-md flex-shrink-0 ml-3 ${scoreBadge(lead.icp_score)}">${lead.icp_score}/100</span>
     </div>
-    <div class="text-xs text-gray-500 mb-1">${esc(lead.contact_name)} · ${esc(lead.contact_role)}</div>
-    <p class="text-xs text-gray-500 leading-relaxed mb-3">${esc(lead.research_summary)}</p>
+    <div class="text-xs text-gray-500 mb-3">${esc(lead.contact_name)} · ${esc(lead.contact_role)}</div>
+    <p class="text-xs text-gray-400 leading-relaxed mb-4">${esc(lead.research_summary)}</p>
     <button id="btn-${lead.id}" onclick="callLead('${lead.id}')"
-      class="w-full bg-gray-800 hover:bg-indigo-600 border border-gray-700 hover:border-indigo-500 text-gray-400 hover:text-white rounded-lg py-2 text-xs font-medium transition-all">
-      📞 Call ${esc(lead.contact_name.split(' ')[0])}
+      class="w-full bg-gray-800 hover:bg-indigo-600 border border-gray-700 hover:border-indigo-500 text-gray-400 hover:text-white rounded-lg py-2.5 text-xs font-medium transition-all">
+      📞 Call ${esc(first)}
     </button>`;
   document.getElementById('cards').appendChild(el);
   el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
