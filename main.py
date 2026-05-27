@@ -711,6 +711,7 @@ async def call_lead(lead_id: str):
             headers={"Authorization": f"Bearer {AGENTPHONE_API_KEY}"},
         )
     result = resp.json()
+    print(f"[AgentPhone] status={resp.status_code} body={result}")
     call_id = result.get("id")
 
     if call_id:
