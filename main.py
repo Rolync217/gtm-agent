@@ -25,8 +25,8 @@ ZEPTOMAIL_TOKEN     = os.getenv("SEND_MAIL_TOKEN_1", "").strip()
 APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "").strip()
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "").strip()
 
-DEMO_PHONE = "+12142184795"
-DEMO_EMAIL = "anandabhinav217@gmail.com"
+DEMO_PHONE = os.getenv("DEMO_PHONE", "+10000000000")
+DEMO_EMAIL = os.getenv("DEMO_EMAIL", "your@email.com")
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 call_context:    dict = {}

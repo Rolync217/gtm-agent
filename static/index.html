@@ -89,6 +89,11 @@
       class="text-xs text-indigo-600 hover:text-indigo-400 underline underline-offset-2 transition-colors">
       ⚡ Demo call (instant)
     </button>
+    <span class="text-gray-800 text-xs">·</span>
+    <button onclick="testPipeline()"
+      class="text-xs text-gray-600 hover:text-gray-400 underline underline-offset-2 transition-colors">
+      🧪 Test UI
+    </button>
   </div>
 </div>
 
@@ -218,6 +223,13 @@ function endCall() {
   if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
   document.getElementById('status-dot').className = 'w-1.5 h-1.5 bg-gray-600 rounded-full';
   document.getElementById('call-status').textContent = 'Call ended';
+  setTimeout(() => {
+    document.getElementById('view-call').classList.add('hidden');
+    document.getElementById('view-leads').classList.remove('hidden');
+    document.getElementById('transcript').innerHTML =
+      '<div id="tx-empty" class="text-center text-white/22 text-sm py-3">Waiting for call to connect...</div>';
+    document.getElementById('call-timer').textContent = '00:00';
+  }, 2500);
 }
 
 // ── ICP ───────────────────────────────────────────────────────────────────────
@@ -397,6 +409,48 @@ function _typewriter(el, text, speed = 14) {
   (function tick() {
     if (i < text.length) { el.textContent += text[i++]; setTimeout(tick, speed); }
   })();
+}
+
+function testPipeline() {
+  _stepCount = 0;
+  document.getElementById('view-icp').classList.add('hidden');
+  document.getElementById('view-leads').classList.remove('hidden');
+  const sd = document.getElementById('step-display');
+  const cardsEl = document.getElementById('cards');
+  if (sd) { sd.style.display = 'flex'; sd.classList.remove('fade-out'); }
+  if (cardsEl) { cardsEl.style.display = 'none'; cardsEl.innerHTML = ''; }
+  step(2);
+  const steps = [
+    'Searching YC Algolia for B2B SaaS companies...',
+    'Found Promptless (W23) — scraping website...',
+    'Scraped promptless.ai — AI prompt management for dev teams',
+    'Searching web for recent funding announcements...',
+    'Found Series A — $4.2M raised in Jan 2024',
+    'Looking up founder on LinkedIn...',
+    'Found Akash Gupta (CEO) — pulling full profile...',
+    'Fetching recent LinkedIn posts...',
+    'Founder posted about outbound challenges 3 days ago',
+    'Looking up email via Apollo...',
+    'Email found — compiling research summary...',
+  ];
+  let i = 0;
+  const iv = setInterval(() => {
+    if (i < steps.length) { showStep(steps[i++]); }
+    else {
+      clearInterval(iv);
+      addCard({
+        id: 'test-lead',
+        company: 'Promptless',
+        batch: 'W23',
+        contact_name: 'Akash Gupta',
+        contact_role: 'CEO & Co-founder',
+        icp_score: 87,
+        research_summary: 'Promptless builds AI prompt management for dev teams. Akash posted last week about struggling to build outbound — all customers came via YC warm intros. Series A closed Jan 2024, now focused on growth.',
+      });
+      showStep('✓ Done — 1 lead found');
+      step(3);
+    }
+  }, 750);
 }
 
 // keep addLog as alias so jumpToCall works unchanged
